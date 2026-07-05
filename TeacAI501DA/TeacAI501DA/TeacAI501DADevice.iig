@@ -1,0 +1,40 @@
+//
+//  TeacAI501DADevice.iig
+//  TeacAI501DA
+//
+// === Claude origin ===
+// Created/placed by Anthropic Claude Code at: 2026-07-03-201500
+// v17: IOUserAudioDevice subclass to receive host-initiated sample rate
+// changes and forward them to the driver's USB reconfiguration path.
+// ====================
+//
+
+#ifndef TeacAI501DADevice_h
+#define TeacAI501DADevice_h
+
+#include <AudioDriverKit/IOUserAudioDevice.iig>
+
+class TeacAI501DA;
+
+class LOCALONLY TeacAI501DADevice : public IOUserAudioDevice
+{
+public:
+    virtual bool init(IOUserAudioDriver* in_driver,
+                      bool in_supports_prewarming,
+                      OSString* in_device_uid,
+                      OSString* in_model_uid,
+                      OSString* in_manufacturer_uid,
+                      uint32_t in_zero_timestamp_period) override;
+    virtual void free() override;
+
+    /*! v18: let the framework process every change, then sync the USB side to
+     *  the (possibly new) nominal rate. Interpreting action numbers is fragile —
+     *  host-initiated rate changes arrive with framework-internal action values. */
+    virtual kern_return_t PerformDeviceConfigurationChange(uint64_t in_change_action,
+                                                           OSObject* in_change_info) override;
+
+    /*! Back-reference to the driver that owns the USB plumbing. */
+    virtual void SetDriverRef(TeacAI501DA* in_driver) LOCALONLY;
+};
+
+#endif /* TeacAI501DADevice_h */

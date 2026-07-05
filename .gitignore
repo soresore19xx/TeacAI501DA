@@ -1,0 +1,43 @@
+# macOS
+.DS_Store
+
+# Xcode build artifacts / per-user state
+build/
+DerivedData/
+*.xcuserstate
+*.xcuserdatad/
+xcuserdata/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# CLAUDE.md mandated: date-prefixed logs + backups
+2026-*.txt
+*.2026-*
+conversation-*.txt
+[0-9][0-9][0-9][0-9]-*-this-session-is-being-continued-from-a-previous-c*.txt
+**/*-permission-mode.txt
+
+# Claude per-project state (auto-memory has its own canonical location; we keep memory-backup though)
+.claude/
+
+# TEAC vendor artifacts — not our code, ambiguous redistribution status
+# (Original distribution: https://teac-global.com/support/opensource/form/)
+teac_usb_hs_audio_pkg_mac_273.4.2.zip
+unpacked/
+pkg_expanded/
+payload_main/
+payload_readme/
+TeacUSBAudio-273.4.2/
+
+# Vendor artifact (duplicate download of the TEAC pkg)
+teacusbaudio-273.4.2.zip
+
+# Pre-edit backups (CLAUDE.md naming rule; kept out of the Xcode synchronized folder)
+backup/
+
+# Internal working documents — local only, not for the public repo
+NEXT-STEPS.md
+TASKLIST.md

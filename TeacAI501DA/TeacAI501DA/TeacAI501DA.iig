@@ -1,0 +1,40 @@
+//
+//  TeacAI501DA.iig
+//  TeacAI501DA
+//
+//  Phase 3a skeleton: derived from IOUserAudioDriver, owns IOUserAudioDevice/Stream/ClockDevice
+//  and the USB Interface from Phase 2c-v2.
+//
+
+#ifndef TeacAI501DA_h
+#define TeacAI501DA_h
+
+#include <Availability.h>
+#include <AudioDriverKit/IOUserAudioDriver.iig>
+#include <USBDriverKit/IOUSBHostInterface.iig>
+#include <USBDriverKit/IOUSBHostPipe.iig>
+
+class TeacAI501DA: public IOUserAudioDriver
+{
+public:
+    virtual kern_return_t Start(IOService * provider) override;
+    virtual kern_return_t Stop(IOService * provider) override;
+    /*! v28: ivars is freed here (final release) instead of in Stop's deferred
+     *  teardown — late callbacks (RT IO-op handler, straggler RPCs) must be able
+     *  to read ivars->fStopping for as long as the object itself is reachable. */
+    virtual void free() override;
+
+    /*! Completion callback for Feedback EP (EP 0x84 IN, 4 bytes Q16.16). */
+    virtual void
+    FeedbackComplete(OSAction * action, IOReturn status) TYPE(IOUSBHostPipe::CompleteAsyncIsochIO);
+
+    /*! Completion callback for OUT Data EP (EP 0x03, Iso Async). */
+    virtual void
+    OutComplete(OSAction * action, IOReturn status) TYPE(IOUSBHostPipe::CompleteAsyncIsochIO);
+
+    /*! v17: switch the USB side to a new sample rate. Called from
+     *  TeacAI501DADevice::PerformDeviceConfigurationChange (host IO stopped). */
+    virtual kern_return_t ReconfigureForRate(uint32_t in_rate_hz) LOCALONLY;
+};
+
+#endif /* TeacAI501DA_h */
