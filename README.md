@@ -132,11 +132,12 @@ and starved the FIFO. Direct feedback-following (item 4) proved correct.
 | Feedback-paced isoch OUT (pipelined ×4) | ✅ |
 | CoreAudio output device, clean playback | ✅ (user-verified "no noise") |
 | All rates 44.1–192 kHz / 24-bit, live rate switching | ✅ (all six rates physically calibrated) |
-| Long soak | ✅ 3 h 51 m hi-res, zero bad/short/overrun |
+| Long soak | ✅ 8 h @ 192 kHz, zero bad/short/overrun/reanchor |
 | Teardown UAF fix + live-unplug crash test | ✅ v28/v29 |
+| Boot-time auto-matching after OS reboot | ✅ wins the race against `usbaudiod` on attempt 1 |
 | DSD/DoP | ❌ Not supported by the hardware (closed) |
-| Hi-res robustness hardening ("cause B": memcpy ring copy, deeper pipeline) | 📋 planned |
-| Device-hang watchdog (AC power cycle automation) | 📋 planned |
+| Hi-res robustness hardening ("cause B": memcpy ring copy, deeper pipeline) | 💤 backlog — not scheduled (no recurrence in the 8 h soak) |
+| Device-hang watchdog (AC power cycle automation) | 💤 backlog — deferred until a device hang is observed again |
 | Volume control (currently full-scale fixed), HID remote (IF#0) | 📋 future |
 
 ## Layout
