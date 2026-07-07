@@ -35,6 +35,12 @@ public:
     /*! v17: switch the USB side to a new sample rate. Called from
      *  TeacAI501DADevice::PerformDeviceConfigurationChange (host IO stopped). */
     virtual kern_return_t ReconfigureForRate(uint32_t in_rate_hz) LOCALONLY;
+
+    /*! v31: called by the volume/mute controls after the framework committed a
+     *  value change. Folds volume (dB) and mute into one atomic Q16 gain read
+     *  by the isoch copy path (unity = strict bit-perfect bypass). */
+    virtual void UpdateOutputVolume(float in_decibel) LOCALONLY;
+    virtual void UpdateOutputMute(bool in_muted) LOCALONLY;
 };
 
 #endif /* TeacAI501DA_h */

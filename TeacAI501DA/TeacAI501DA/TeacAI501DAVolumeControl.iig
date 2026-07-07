@@ -1,0 +1,42 @@
+//
+//  TeacAI501DAVolumeControl.iig
+//  TeacAI501DA
+//
+// === Claude origin ===
+// Created/placed by Anthropic Claude Code at: 2026-07-07-221500
+// v31: software output volume control. The AI-501DA's UAC2 descriptor exposes
+// no Feature Unit (no hardware volume on USB), so gain is applied in the
+// driver's isoch copy path. One class per .iig — the iig tool derives the
+// generated header name from the class name.
+// ====================
+//
+
+#ifndef TeacAI501DAVolumeControl_h
+#define TeacAI501DAVolumeControl_h
+
+#include <AudioDriverKit/IOUserAudioLevelControl.iig>
+
+class TeacAI501DA;
+
+class LOCALONLY TeacAI501DAVolumeControl : public IOUserAudioLevelControl
+{
+public:
+    virtual bool init(IOUserAudioDriver* in_driver,
+                      bool in_is_settable,
+                      float in_decibel_value,
+                      IOUserAudioLevelControlRange in_decibel_range,
+                      IOUserAudioObjectPropertyElement in_control_element,
+                      IOUserAudioObjectPropertyScope in_control_scope,
+                      IOUserAudioClassID in_control_class_id) override;
+    virtual void free() override;
+
+    /*! Host volume changes arrive on either axis (slider = scalar, apps may
+     *  set decibels directly); both funnel into the driver's gain update. */
+    virtual kern_return_t HandleChangeScalarValue(float in_scalar_value) override;
+    virtual kern_return_t HandleChangeDecibelValue(float in_decibel_value) override;
+
+    /*! Back-reference to the driver that owns the gain state. */
+    virtual void SetDriverRef(TeacAI501DA* in_driver) LOCALONLY;
+};
+
+#endif /* TeacAI501DAVolumeControl_h */

@@ -35,6 +35,8 @@
 
 #include "TeacAI501DA.h"
 #include "TeacAI501DADevice.h"
+#include "TeacAI501DAVolumeControl.h"
+#include "TeacAI501DAMuteControl.h"
 
 #define LOG OS_LOG_DEFAULT
 #define LOG_PREFIX "TeacAI501DA: "
@@ -103,6 +105,47 @@ NominalFbQ16(uint32_t rate_hz)
     return (uint32_t)(((uint64_t)rate_hz << 16) / MICROFRAMES_PER_SEC);
 }
 
+// v31: software output volume. The AI-501DA's UAC2 has no Feature Unit — there
+// is no hardware volume/mute on USB (TEAC's manual states the unit cannot be
+// controlled from the PC; the HID interface is not used by any stock driver
+// either). Gain is applied to the 24-bit samples in the isoch copy path.
+// Unity gain (0 dB, unmuted) bypasses the multiply entirely — bit-perfect.
+#define VOLUME_MIN_DB                 (-60.0f)
+#define VOLUME_MAX_DB                 (0.0f)
+#define GAIN_Q16_UNITY                65536u
+
+// 10^(dB/20) in Q16, -60 dB .. 0 dB in 0.5 dB steps (121 entries). A table
+// because DriverKit has no libm; 0.5 dB granularity is inaudible.
+static const uint32_t kGainTableQ16[121] = {
+    66u, 69u, 74u, 78u, 83u, 87u, 93u, 98u,
+    104u, 110u, 117u, 123u, 131u, 139u, 147u, 155u,
+    165u, 174u, 185u, 196u, 207u, 220u, 233u, 246u,
+    261u, 276u, 293u, 310u, 328u, 348u, 369u, 390u,
+    414u, 438u, 464u, 491u, 521u, 551u, 584u, 619u,
+    655u, 694u, 735u, 779u, 825u, 874u, 926u, 981u,
+    1039u, 1100u, 1165u, 1234u, 1308u, 1385u, 1467u, 1554u,
+    1646u, 1744u, 1847u, 1957u, 2072u, 2195u, 2325u, 2463u,
+    2609u, 2764u, 2927u, 3101u, 3285u, 3479u, 3685u, 3904u,
+    4135u, 4380u, 4640u, 4915u, 5206u, 5514u, 5841u, 6187u,
+    6554u, 6942u, 7353u, 7789u, 8250u, 8739u, 9257u, 9806u,
+    10387u, 11002u, 11654u, 12345u, 13076u, 13851u, 14672u, 15541u,
+    16462u, 17437u, 18471u, 19565u, 20724u, 21952u, 23253u, 24631u,
+    26090u, 27636u, 29274u, 31008u, 32846u, 34792u, 36854u, 39037u,
+    41350u, 43801u, 46396u, 49145u, 52057u, 55142u, 58409u, 61870u,
+    65536u,
+};
+
+static inline uint32_t
+GainQ16FromDecibel(float db)
+{
+    if (db <= VOLUME_MIN_DB) return 0;              // slider floor = hard silence
+    if (db >= VOLUME_MAX_DB) return GAIN_Q16_UNITY;
+    int idx = (int)((db - VOLUME_MIN_DB) * 2.0f + 0.5f);
+    if (idx < 0) idx = 0;
+    if (idx > 120) idx = 120;
+    return kGainTableQ16[idx];
+}
+
 // AI-501DA topology (ai501da_lsusb.txt)
 #define DEVICE_CONFIG_VALUE           1
 #define AUDIO_CONTROL_IF_NUM          2        // UAC2 AudioControl interface
@@ -151,6 +194,12 @@ struct TeacAI501DA_IVars
     // CoreAudio (AudioDriverKit) objects — held as raw retained pointers
     IOUserAudioDevice        *fAudioDevice;     // retain()/release(); also the clock device
     IOUserAudioStream        *fOutputStream;
+    // v31: software volume/mute (no USB Feature Unit on this device)
+    TeacAI501DAVolumeControl *fVolumeControl;
+    TeacAI501DAMuteControl   *fMuteControl;
+    volatile uint32_t         fGainQ16;         // effective gain (volume × mute); GAIN_Q16_UNITY = bypass
+    volatile uint32_t         fVolumeGainQ16;   // volume-only gain, kept so unmute restores it
+    volatile bool             fOutputMuted;
     IOBufferMemoryDescriptor *fCoreAudioBuf;
     void                     *fCoreAudioBufPtr; // cached virtual address
     size_t                    fCoreAudioBufLen;
@@ -191,6 +240,15 @@ struct TeacAI501DA_IVars
     // v25 (cause A guard): count of reader re-anchors to just below write when it was
     // about to overtake. >0 = stale reads (= loud bursts) prevented. 0 is ideal (fixing B removes the trigger).
     uint64_t                  fRingGuardReanchors;
+
+    // v30 (underrun silence fill): when CoreAudio stops supplying (WriteEnd frozen —
+    // source app died mid-stream, stream torn down without a stop), the reader used
+    // to orbit the ring and replay the last ring-full of stale audio indefinitely
+    // (observed 2026-07-04 20:42–20:50: 8 minutes of looped replay after caEnd froze;
+    // the v25 guard only fires while write is advancing). Now every copy is clamped
+    // to what CoreAudio has actually written; the remainder is zero-filled (silence).
+    uint64_t                  fSilenceFilledSamples;  // total samples emitted as silence instead of stale ring
+    bool                      fUnderrunActive;        // supply-stall state (for edge-triggered logging)
 
     // v28 (teardown/reconfigure quiesce): the old Stop() released everything and
     // completed IOSafeDeleteNULL(ivars) before the abort completions queued behind it
@@ -548,6 +606,9 @@ IMPL(TeacAI501DA, Start)
     ivars->fRateAccum = 0;
     ivars->fFbCurrentQ16 = NominalFbQ16(BASELINE_SAMPLE_RATE);  // v27: seed pacing until Ff arrives
     ivars->fFbAccumQ16 = 0;
+    // v31: unity gain (bit-perfect bypass) until the host sets a volume
+    ivars->fGainQ16 = GAIN_Q16_UNITY;
+    ivars->fVolumeGainQ16 = GAIN_Q16_UNITY;
 
     // ---- USB device-level ownership + IF#3 open + alt 1 + pipes (v4) ----
     IOUSBHostDevice *device = OSDynamicCast(IOUSBHostDevice, provider);
@@ -808,6 +869,50 @@ IMPL(TeacAI501DA, Start)
             goto fail_audio;
         }
 
+        // v31: software volume + mute controls (macOS volume slider / media keys).
+        // The device's UAC2 exposes no Feature Unit, so these are the only way
+        // to control level short of the amp's physical knob.
+        {
+            IOUserAudioLevelControlRange range = { VOLUME_MIN_DB, VOLUME_MAX_DB };
+            TeacAI501DAVolumeControl *vol = OSTypeAlloc(TeacAI501DAVolumeControl);
+            if (!vol || !vol->init(this, true, VOLUME_MAX_DB, range,
+                                   IOUserAudioObjectPropertyElementMain,
+                                   IOUserAudioObjectPropertyScope::Output,
+                                   IOUserAudioClassID::VolumeControl)) {
+                os_log(LOG, LOG_PREFIX "TeacAI501DAVolumeControl init failed");
+                OSSafeReleaseNULL(vol);
+                ret = kIOReturnNoResources;
+                goto fail_audio;
+            }
+            vol->SetDriverRef(this);
+            ivars->fVolumeControl = vol;   // owns the alloc reference
+            ret = ivars->fAudioDevice->AddControl(vol);
+            if (ret != kIOReturnSuccess) {
+                os_log(LOG, LOG_PREFIX "AddControl(volume) failed (0x%x)", ret);
+                goto fail_audio;
+            }
+
+            TeacAI501DAMuteControl *mute = OSTypeAlloc(TeacAI501DAMuteControl);
+            if (!mute || !mute->init(this, true, false,
+                                     IOUserAudioObjectPropertyElementMain,
+                                     IOUserAudioObjectPropertyScope::Output,
+                                     IOUserAudioClassID::MuteControl)) {
+                os_log(LOG, LOG_PREFIX "TeacAI501DAMuteControl init failed");
+                OSSafeReleaseNULL(mute);
+                ret = kIOReturnNoResources;
+                goto fail_audio;
+            }
+            mute->SetDriverRef(this);
+            ivars->fMuteControl = mute;    // owns the alloc reference
+            ret = ivars->fAudioDevice->AddControl(mute);
+            if (ret != kIOReturnSuccess) {
+                os_log(LOG, LOG_PREFIX "AddControl(mute) failed (0x%x)", ret);
+                goto fail_audio;
+            }
+            os_log(LOG, LOG_PREFIX "volume/mute controls registered (range %d..%d dB)",
+                   (int)VOLUME_MIN_DB, (int)VOLUME_MAX_DB);
+        }
+
         // ---- Phase 3b: IO operation handler ----
         // CoreAudio HAL writes interleaved 16bit/2ch PCM into fCoreAudioBuf and notifies us
         // with IOUserAudioIOOperationWriteEnd. We record the latest sample_time so OutComplete
@@ -859,6 +964,8 @@ IMPL(TeacAI501DA, Start)
     return kIOReturnSuccess;
 
 fail_audio:
+    OSSafeReleaseNULL(ivars->fVolumeControl);
+    OSSafeReleaseNULL(ivars->fMuteControl);
     OSSafeReleaseNULL(ivars->fOutputStream);
     OSSafeReleaseNULL(ivars->fCoreAudioBuf);
     OSSafeReleaseNULL(ivars->fAudioDevice);
@@ -958,7 +1065,7 @@ IMPL(TeacAI501DA, OutComplete)
     } else {
         ivars->fOutCount++;
         if ((ivars->fOutCount % 1000) == 1) {
-            os_log(LOG, LOG_PREFIX "OUT #%llu samples/uF=%u usbCumul=%llu caEnd=%llu bad=%llu short=%llu peak=%u lastBad=0x%08x deficitSmp=%llu worstShort=%u diverg=%llu maxDiverg=%llu overrun=%llu resyncN=%llu reanchor=%llu",
+            os_log(LOG, LOG_PREFIX "OUT #%llu samples/uF=%u usbCumul=%llu caEnd=%llu bad=%llu short=%llu peak=%u lastBad=0x%08x deficitSmp=%llu worstShort=%u diverg=%llu maxDiverg=%llu overrun=%llu resyncN=%llu reanchor=%llu silence=%llu",
                    ivars->fOutCount, ivars->fSamplesPerUF,
                    ivars->fUsbCumulativeSamples, ivars->fCoreAudioWriteEndSample,
                    ivars->fOutBadFrames, ivars->fOutShortFrames, ivars->fPeakLevel,
@@ -966,7 +1073,7 @@ IMPL(TeacAI501DA, OutComplete)
                    (ivars->fUsbCumulativeSamples >= ivars->fUsbCompletedSamples
                     ? ivars->fUsbCumulativeSamples - ivars->fUsbCompletedSamples : 0),
                    ivars->fMaxDivergence, ivars->fRingOverrunEvents, ivars->fResyncCount,
-                   ivars->fRingGuardReanchors);
+                   ivars->fRingGuardReanchors, ivars->fSilenceFilledSamples);
             ivars->fPeakLevel = 0;
             ivars->fWorstShortSamples = 0;   // v23: per-interval max, reset each summary
         }
@@ -1042,8 +1149,8 @@ IMPL(TeacAI501DA, OutComplete)
                 // (read normally sits below write's safety margin and never triggers);
                 // this fires only on overtake. Structurally forbids stale reads
                 // (= audible breakdown).
+                uint64_t writePos = ivars->fCoreAudioWriteEndSample;
                 {
-                    uint64_t writePos = ivars->fCoreAudioWriteEndSample;
                     bool playing = (writePos != ivars->fPrevWriteEnd);
                     if (playing &&
                         (ivars->fUsbCumulativeSamples + totalSamplesNext) > writePos) {
@@ -1059,16 +1166,70 @@ IMPL(TeacAI501DA, OutComplete)
                 uint64_t startSample = ivars->fUsbCumulativeSamples;
 
                 size_t bytesNeeded = totalSamplesNext * OUT_BYTES_PER_SAMPLE;
+                // v30: clamp the copy to what CoreAudio has actually written past our
+                // read position; the rest of the transfer is zero-filled below. When
+                // the supply stops entirely (writePos frozen), availBytes reaches 0
+                // and the output decays to silence instead of orbiting the ring and
+                // replaying stale audio. Healthy playback always has read a safety
+                // offset below write, so this path never truncates real audio.
+                size_t availBytes = bytesNeeded;
+                if (writePos <= startSample) {
+                    availBytes = 0;
+                } else if ((writePos - startSample) < (uint64_t)totalSamplesNext) {
+                    availBytes = (size_t)(writePos - startSample) * OUT_BYTES_PER_SAMPLE;
+                }
+                if (availBytes < bytesNeeded) {
+                    ivars->fSilenceFilledSamples += (bytesNeeded - availBytes) / OUT_BYTES_PER_SAMPLE;
+                    // edge-triggered log; writePos != 0 skips the idle state before
+                    // the first WriteEnd ever arrives (not a stall, nothing to report)
+                    if (!ivars->fUnderrunActive && writePos != 0) {
+                        ivars->fUnderrunActive = true;
+                        os_log(LOG, LOG_PREFIX "supply underrun — silence fill engaged (read=%llu write=%llu)",
+                               startSample, writePos);
+                    }
+                } else if (ivars->fUnderrunActive) {
+                    ivars->fUnderrunActive = false;
+                    os_log(LOG, LOG_PREFIX "supply resumed — silence fill disengaged (read=%llu write=%llu)",
+                           startSample, writePos);
+                }
                 size_t outPos = 0;
                 for (uint32_t i = 0; i < NUM_OUT_FRAMES && outPos < bytesNeeded; i++) {
                     IOUSBIsochronousFrame *frames = (IOUSBIsochronousFrame *)flSeg.address;
                     uint32_t fb = frames[i].requestCount;
                     if (outPos + fb > bytesNeeded) break;
                     for (uint32_t b = 0; b < fb; b++) {
-                        size_t srcIdx = ((startSample * OUT_BYTES_PER_SAMPLE) + outPos + b) % srcLen;
-                        out[outPos + b] = src[srcIdx];
+                        size_t pos = outPos + b;
+                        if (pos < availBytes) {
+                            size_t srcIdx = ((startSample * OUT_BYTES_PER_SAMPLE) + pos) % srcLen;
+                            out[pos] = src[srcIdx];
+                        } else {
+                            out[pos] = 0;   // v30: unwritten region — silence, never stale ring data
+                        }
                     }
                     outPos += fb;
+                }
+                // v31: software volume — applied in place on the contiguous OUT
+                // chunk. Unity (0 dB, unmuted) skips the loop entirely, keeping
+                // the historical bit-perfect path byte-identical. Gain <= 1.0
+                // by construction, so no clipping is possible.
+                {
+                    uint32_t gain = __atomic_load_n(&ivars->fGainQ16, __ATOMIC_ACQUIRE);
+                    if (gain != GAIN_Q16_UNITY && outPos > 0) {
+                        if (gain == 0) {
+                            memset(out, 0, outPos);   // mute / slider floor
+                        } else {
+                            for (size_t b = 0; b + 2 < outPos; b += 3) {
+                                uint32_t rawS = (uint32_t)out[b]
+                                              | ((uint32_t)out[b+1] << 8)
+                                              | ((uint32_t)out[b+2] << 16);
+                                int32_t v = (int32_t)(rawS << 8) >> 8;   // sign-extend 24-bit
+                                v = (int32_t)(((int64_t)v * (int64_t)gain) >> 16);
+                                out[b]   = (uint8_t)(v & 0xFF);
+                                out[b+1] = (uint8_t)((v >> 8) & 0xFF);
+                                out[b+2] = (uint8_t)((v >> 16) & 0xFF);
+                            }
+                        }
+                    }
                 }
                 // peak of the chunk just copied (0 = silence): approximate
                 // from the top 2 bytes of each 3-byte 24bit sample
@@ -1244,6 +1405,8 @@ TeacAI501DA::ReconfigureForRate(uint32_t in_rate_hz)
     ivars->fLastBadStatus = 0;
     ivars->fFirstBadLogged = false;
     ivars->fPeakLevel = 0;
+    ivars->fSilenceFilledSamples = 0;   // v30: per-rate observation, like bad/short
+    ivars->fUnderrunActive = false;
     ivars->fNextZtsSample = ZTS_PERIOD_FRAMES;
     if (ivars->fCoreAudioBufPtr) {
         memset(ivars->fCoreAudioBufPtr, 0, ivars->fCoreAudioBufLen);
@@ -1266,6 +1429,37 @@ TeacAI501DA::ReconfigureForRate(uint32_t in_rate_hz)
     os_log(LOG, LOG_PREFIX "rate %u armed (ret=0x%x deferred=%d)", in_rate_hz, ret,
            ivars->fRearmAfterDrain ? 1 : 0);
     return ret;
+}
+
+// v31: fold volume (dB) and mute into one atomic Q16 gain for the isoch copy
+// path. Runs on the controls' work-queue context (never concurrently with
+// itself per control); the RT reader only ever sees a complete uint32.
+void
+TeacAI501DA::UpdateOutputVolume(float in_decibel)
+{
+    if (!ivars) {
+        return;
+    }
+    uint32_t gain = GainQ16FromDecibel(in_decibel);
+    __atomic_store_n(&ivars->fVolumeGainQ16, gain, __ATOMIC_RELAXED);
+    uint32_t eff = ivars->fOutputMuted ? 0 : gain;
+    __atomic_store_n(&ivars->fGainQ16, eff, __ATOMIC_RELEASE);
+    os_log(LOG, LOG_PREFIX "volume -> %d.%u dB gainQ16=%u muted=%d",
+           (int)in_decibel,
+           (uint32_t)((in_decibel - (int)in_decibel) * -10.0f + 0.5f) % 10,
+           gain, ivars->fOutputMuted ? 1 : 0);
+}
+
+void
+TeacAI501DA::UpdateOutputMute(bool in_muted)
+{
+    if (!ivars) {
+        return;
+    }
+    ivars->fOutputMuted = in_muted;
+    uint32_t eff = in_muted ? 0 : __atomic_load_n(&ivars->fVolumeGainQ16, __ATOMIC_RELAXED);
+    __atomic_store_n(&ivars->fGainQ16, eff, __ATOMIC_RELEASE);
+    os_log(LOG, LOG_PREFIX "mute -> %d gainQ16=%u", in_muted ? 1 : 0, eff);
 }
 
 kern_return_t
@@ -1323,6 +1517,8 @@ IMPL(TeacAI501DA, Stop)
         // after issuing Cancel.
         os_log(LOG, LOG_PREFIX "Stop: teardown (reconf-wait %ums, inflight=%u incl. cancel-orphaned)",
                waitedMs, __atomic_load_n(&ivars->fIoInFlight, __ATOMIC_ACQUIRE));
+        OSSafeReleaseNULL(ivars->fVolumeControl);
+        OSSafeReleaseNULL(ivars->fMuteControl);
         OSSafeReleaseNULL(ivars->fOutputStream);
         OSSafeReleaseNULL(ivars->fCoreAudioBuf);
         OSSafeReleaseNULL(ivars->fAudioDevice);

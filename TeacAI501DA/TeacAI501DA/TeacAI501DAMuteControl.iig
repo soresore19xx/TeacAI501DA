@@ -1,0 +1,37 @@
+//
+//  TeacAI501DAMuteControl.iig
+//  TeacAI501DA
+//
+// === Claude origin ===
+// Created/placed by Anthropic Claude Code at: 2026-07-07-221500
+// v31: software output mute control (no hardware mute on the device's UAC2).
+// One class per .iig — the iig tool derives the generated header name from
+// the class name.
+// ====================
+//
+
+#ifndef TeacAI501DAMuteControl_h
+#define TeacAI501DAMuteControl_h
+
+#include <AudioDriverKit/IOUserAudioBooleanControl.iig>
+
+class TeacAI501DA;
+
+class LOCALONLY TeacAI501DAMuteControl : public IOUserAudioBooleanControl
+{
+public:
+    virtual bool init(IOUserAudioDriver* in_driver,
+                      bool in_is_settable,
+                      bool in_control_value,
+                      IOUserAudioObjectPropertyElement in_control_element,
+                      IOUserAudioObjectPropertyScope in_control_scope,
+                      IOUserAudioClassID in_control_class_id) override;
+    virtual void free() override;
+
+    virtual kern_return_t HandleChangeControlValue(bool in_control_value) override;
+
+    /*! Back-reference to the driver that owns the gain state. */
+    virtual void SetDriverRef(TeacAI501DA* in_driver) LOCALONLY;
+};
+
+#endif /* TeacAI501DAMuteControl_h */

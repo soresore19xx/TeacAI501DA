@@ -52,7 +52,7 @@ setting the AI-501DA reports **(actual consumption − 1)** in its feedback
 value, so the true rate is `Ff + 1.0` (Q16.16). All six rates calibrate to
 `(Ff + 1) = rate / 8000` within 0.03 %.
 
-## Architecture (v29)
+## Architecture (v31)
 
 The dext owns the **whole USB device**, not just the streaming interface:
 
@@ -98,6 +98,18 @@ The dext owns the **whole USB device**, not just the streaming interface:
 7. **Overrun guard** — if the USB reader is about to overtake the CoreAudio
    writer (divergence accumulated from short frames), the reader re-anchors
    behind the write position instead of looping stale ring data.
+8. **Underrun silence fill (v30)** — every ring copy is clamped to what
+   CoreAudio has actually written; the remainder is zero-filled. When the
+   supply stops entirely (source app dies mid-stream, stream torn down
+   without a clean stop), the output decays to silence instead of endlessly
+   replaying the last ring-full of stale audio.
+9. **Software volume + mute (v31)** — `IOUserAudioLevelControl` (−60…0 dB,
+   0.5 dB gain table) plus `IOUserAudioBooleanControl`, wired to the macOS
+   volume slider / media keys. Gain is applied to the 24-bit samples in the
+   isoch copy path; unity gain (0 dB, unmuted) bypasses the multiply
+   entirely, preserving the bit-perfect path. The device's UAC2 exposes no
+   Feature Unit — a hardware volume simply does not exist on USB (TEAC's
+   manual states the unit cannot be controlled from the PC).
 
 The TEAC slow-PLL port (`ApplyAssp8802Correction`) is retained in the source
 for observation but **disabled** (`ENABLE_ASSP8802_PLL 0`): with the device's
@@ -138,7 +150,9 @@ and starved the FIFO. Direct feedback-following (item 4) proved correct.
 | DSD/DoP | ❌ Not supported by the hardware (closed) |
 | Hi-res robustness hardening ("cause B": memcpy ring copy, deeper pipeline) | 💤 backlog — not scheduled (no recurrence in the 8 h soak) |
 | Device-hang watchdog (AC power cycle automation) | 💤 backlog — deferred until a device hang is observed again |
-| Volume control (currently full-scale fixed), HID remote (IF#0) | 📋 future |
+| Underrun silence fill (no stale-ring looping when the source stops) | ✅ v30 |
+| Software volume / mute (0 dB = bit-perfect bypass) | ✅ v31 |
+| HID remote (IF#0) | 📋 future — research says host control is unlikely (TEAC's manual denies PC control; no stock driver touches HID) |
 
 ## Layout
 
@@ -147,9 +161,13 @@ TeacAI501DA/                    Xcode project (dext + installer app)
 ├── TeacAI501DA.xcodeproj
 ├── TeacAI501DA/
 │   ├── TeacAI501DA.iig         driver class declaration
-│   ├── TeacAI501DA.cpp         driver implementation (~1350 lines)
+│   ├── TeacAI501DA.cpp         driver implementation (~1570 lines)
 │   ├── TeacAI501DADevice.iig   IOUserAudioDevice subclass (rate changes)
 │   ├── TeacAI501DADevice.cpp
+│   ├── TeacAI501DAVolumeControl.iig  IOUserAudioLevelControl subclass (software volume)
+│   ├── TeacAI501DAVolumeControl.cpp
+│   ├── TeacAI501DAMuteControl.iig    IOUserAudioBooleanControl subclass (software mute)
+│   ├── TeacAI501DAMuteControl.cpp
 │   ├── TeacAI501DA.entitlements  (development variant: idVendor "*")
 │   └── Info.plist              IOKitPersonalities (IOUSBHostDevice match)
 └── TeacAI501DAInstaller/       minimal container app
@@ -157,7 +175,6 @@ TeacAI501DA/                    Xcode project (dext + installer app)
     └── TeacAI501DAInstaller.entitlements
 
 ai501da_lsusb.txt               Full USB descriptor dump of the device
-memory-backup/                  Project notes (USB quirks, design decisions)
 ```
 
 ## Build & Deploy
