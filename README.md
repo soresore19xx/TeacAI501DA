@@ -152,6 +152,8 @@ and starved the FIFO. Direct feedback-following (item 4) proved correct.
 | Device-hang watchdog (AC power cycle automation) | 💤 backlog — deferred until a device hang is observed again |
 | Underrun silence fill (no stale-ring looping when the source stops) | ✅ v30 |
 | Software volume / mute (0 dB = bit-perfect bypass) | ✅ v31 |
+| Developer ID distribution entitlement (DriverKit + family.audio + USB transport) | ✅ granted by Apple |
+| Developer ID signed + notarized build | ✅ v36 (universal, stapled) |
 | HID remote (IF#0) | 📋 future — research says host control is unlikely (TEAC's manual denies PC control; no stock driver touches HID) |
 
 ## Layout
@@ -168,7 +170,7 @@ TeacAI501DA/                    Xcode project (dext + installer app)
 │   ├── TeacAI501DAVolumeControl.cpp
 │   ├── TeacAI501DAMuteControl.iig    IOUserAudioBooleanControl subclass (software mute)
 │   ├── TeacAI501DAMuteControl.cpp
-│   ├── TeacAI501DA.entitlements  (development variant: idVendor "*")
+│   ├── TeacAI501DA.entitlements  (distribution variant: idVendor 1604)
 │   └── Info.plist              IOKitPersonalities (IOUSBHostDevice match)
 └── TeacAI501DAInstaller/       minimal container app
     ├── main.swift              OSSystemExtensionRequest.activationRequest
@@ -189,6 +191,54 @@ xcodebuild -scheme TeacAI501DA -configuration Debug CODE_SIGNING_ALLOWED=NO buil
 # without per-entitlement review when the entitlements file uses the
 # "development variant" wildcards). A Personal Team cannot provision DriverKit.
 xcodebuild -scheme TeacAI501DA -configuration Debug build
+```
+
+### Build flavors
+
+The default build exposes software volume/mute controls (0 dB = strict
+bit-perfect bypass). A **fixed-volume** flavor — no controls exposed to the
+OS, no gain path compiled in, full-scale passthrough only — builds from the
+same source:
+
+```sh
+xcodebuild -scheme TeacAI501DAInstaller -configuration Debug \
+  GCC_PREPROCESSOR_DEFINITIONS='DEBUG=1 TEAC_FIXED_VOLUME=1' build
+```
+
+Swapping flavors on one machine requires a higher `CFBundleVersion` (the
+system only replaces a dext on upgrade), or a
+`systemextensionsctl uninstall` first.
+
+### Developer ID (notarized) build
+
+With the DriverKit distribution entitlements granted, the project builds a
+Developer ID signed, notarized dext that loads on any Mac — no per-device
+UDID registration. Both App IDs need the distribution capabilities enabled
+(they are separate portal entries from the `(development)` ones), and the
+Developer ID certificate must be issued under the **G2 sub-CA** (the legacy
+sub-CA expires 2027-02-01 and caps the leaf certificate with it).
+
+```sh
+xcodebuild -project TeacAI501DA.xcodeproj \
+  -scheme TeacAI501DAInstaller -configuration Release \
+  DEVELOPMENT_TEAM=<TeamID> \
+  CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
+  OTHER_CODE_SIGN_FLAGS=--timestamp \
+  ONLY_ACTIVE_ARCH=NO ARCHS="x86_64 arm64" \
+  clean build
+```
+
+All three extra settings are required: `Release` and
+`CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO` keep `get-task-allow` out of the
+signature (it is not in a Developer ID profile), and `--timestamp` overrides
+Xcode's default `--timestamp=none`, without which notarization fails with
+*"The signature does not include a secure timestamp."*
+
+```sh
+ditto -c -k --keepParent TeacAI501DAInstaller.app app.zip
+xcrun notarytool submit app.zip --key <AuthKey.p8> --key-id <KeyID> \
+  --issuer <IssuerID> --wait
+xcrun stapler staple TeacAI501DAInstaller.app
 ```
 
 Deployment loop (the dext is replaced only when `CFBundleVersion` increases):
@@ -225,18 +275,19 @@ Deployment loop (the dext is replaced only when `CFBundleVersion` increases):
 
 ## Status of Distribution
 
-No binary releases are available yet. The DEXT currently runs as a
-development-signed build on the author's own machines (development profiles
-expire yearly; rebuild + re-activate required).
+Apple granted the DriverKit **distribution** entitlements for this project
+(`com.apple.developer.driverkit`, `.family.audio`, `.transport.usb`), and the
+driver now builds as a Developer ID signed, notarized, universal binary. Such
+a build loads on any Mac without UDID registration, and — because Developer ID
+provisioning profiles are valid 18 years from creation and notarization
+tickets do not expire — it keeps working independently of Apple Developer
+Program membership status.
 
-A **Developer ID distribution path is in progress**: a DriverKit distribution
-entitlement request has been prepared for Apple. If granted, a Developer ID +
-notarized build keeps working long-term (Developer ID provisioning profiles
-are valid 18 years from creation; notarization tickets do not expire)
-independent of Apple Developer Program membership status. Until then, other
-AI-501DA owners can build and development-sign the project with their own
-Apple Developer (Individual) team — see Build & Deploy above. Licensing in
-this repository (see below) is already distribution-ready.
+No public binary release is offered here. A Developer ID signature carries the
+signer's legal name, which this repository deliberately does not publish.
+Other AI-501DA owners can build the project with their own Apple Developer
+(Individual) team — see Build & Deploy above; the licensing in this repository
+is distribution-ready.
 
 ## License
 

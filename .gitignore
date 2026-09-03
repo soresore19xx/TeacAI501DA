@@ -41,3 +41,6 @@ backup/
 # Internal working documents — local only, not for the public repo
 NEXT-STEPS.md
 TASKLIST.md
+
+# local installer images (binaries stay out of the repo)
+dist/

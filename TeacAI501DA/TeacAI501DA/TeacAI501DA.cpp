@@ -105,6 +105,18 @@ NominalFbQ16(uint32_t rate_hz)
     return (uint32_t)(((uint64_t)rate_hz << 16) / MICROFRAMES_PER_SEC);
 }
 
+// v34: build-variant switch. Building with TEAC_FIXED_VOLUME=1 (the
+// "fixed-volume" distribution flavor) omits the software volume/mute
+// entirely — no controls are exposed to the OS and the gain path is compiled
+// out, so the signal chain contains no level processing at all. The default
+// (0) is the full v31 behavior: volume/mute controls with a strict 0 dB
+// bypass. Pass GCC_PREPROCESSOR_DEFINITIONS='DEBUG=1 TEAC_FIXED_VOLUME=1'
+// to xcodebuild to produce the fixed flavor from the same source.
+#ifndef TEAC_FIXED_VOLUME
+#define TEAC_FIXED_VOLUME             0
+#endif
+#define ENABLE_SOFT_VOLUME            (!TEAC_FIXED_VOLUME)
+
 // v31: software output volume. The AI-501DA's UAC2 has no Feature Unit — there
 // is no hardware volume/mute on USB (TEAC's manual states the unit cannot be
 // controlled from the PC; the HID interface is not used by any stock driver
@@ -872,6 +884,7 @@ IMPL(TeacAI501DA, Start)
         // v31: software volume + mute controls (macOS volume slider / media keys).
         // The device's UAC2 exposes no Feature Unit, so these are the only way
         // to control level short of the amp's physical knob.
+#if ENABLE_SOFT_VOLUME
         {
             IOUserAudioLevelControlRange range = { VOLUME_MIN_DB, VOLUME_MAX_DB };
             TeacAI501DAVolumeControl *vol = OSTypeAlloc(TeacAI501DAVolumeControl);
@@ -912,6 +925,10 @@ IMPL(TeacAI501DA, Start)
             os_log(LOG, LOG_PREFIX "volume/mute controls registered (range %d..%d dB)",
                    (int)VOLUME_MIN_DB, (int)VOLUME_MAX_DB);
         }
+#else
+        // fixed-volume flavor: no controls, no gain path — full-scale passthrough only
+        os_log(LOG, LOG_PREFIX "fixed-volume build — no volume/mute controls");
+#endif
 
         // ---- Phase 3b: IO operation handler ----
         // CoreAudio HAL writes interleaved 16bit/2ch PCM into fCoreAudioBuf and notifies us
@@ -1212,6 +1229,7 @@ IMPL(TeacAI501DA, OutComplete)
                 // chunk. Unity (0 dB, unmuted) skips the loop entirely, keeping
                 // the historical bit-perfect path byte-identical. Gain <= 1.0
                 // by construction, so no clipping is possible.
+#if ENABLE_SOFT_VOLUME
                 {
                     uint32_t gain = __atomic_load_n(&ivars->fGainQ16, __ATOMIC_ACQUIRE);
                     if (gain != GAIN_Q16_UNITY && outPos > 0) {
@@ -1231,6 +1249,7 @@ IMPL(TeacAI501DA, OutComplete)
                         }
                     }
                 }
+#endif
                 // peak of the chunk just copied (0 = silence): approximate
                 // from the top 2 bytes of each 3-byte 24bit sample
                 for (size_t b = 0; b + 2 < outPos; b += 3) {
