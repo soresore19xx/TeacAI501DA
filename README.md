@@ -1,237 +1,154 @@
 # TeacAI501DA
 
-A macOS DriverKit DEXT (Driver Extension) that takes over the **TEAC AI-501DA**
-USB DAC (VID `0x0644` / PID `0x8038`) and restores stable audio playback on
-**Apple Silicon macOS 26.5 (Tahoe)**.
+A macOS DriverKit driver extension for the **TEAC AI-501DA** USB DAC
+(VID `0x0644` / PID `0x8038`), which the generic system USB audio driver
+cannot play reliably.
 
-**Status: working.** The dext is signed (Apple Developer Program, development
-profile), activated on the target machine (M4 Mac mini), and plays clean audio
-at all supported rates (44.1–192 kHz / 24-bit). It has survived a 3 h 51 m
-continuous hi-res soak with zero errors, and its teardown path has been
-crash-tested against live-streaming device removal.
+Working and in daily use on macOS 26.5 (Tahoe): all six rates
+44.1–192 kHz at 24-bit, live rate switching, an 8-hour continuous soak at
+192 kHz with zero errors, and a teardown path crash-tested against removing
+the device's AC power mid-stream.
 
-This is a personal, non-commercial reverse-engineering project.
+Personal, non-commercial reverse-engineering project. Unofficial, and not
+affiliated with TEAC.
 
-## The Problem
+## Install
 
-On macOS 26.5 Apple Silicon, the generic system USB audio service
-(`usbaudiod`, the user-space replacement of `AppleUSBAudio.kext` 850.5)
-fails to play continuous audio on the AI-501DA:
+Download the notarized disk image from
+[Releases](https://github.com/soresore19xx/TeacAI501DA/releases), drag the app
+into `/Applications`, and launch it. It asks whether to install or uninstall
+and reports the result; `--install` and `--uninstall` skip the prompt for
+scripted runs. The first install needs approval under
+**System Settings > General > Login Items & Extensions > Driver Extensions**,
+after which the DAC must be power-cycled so it re-enumerates.
 
-- The first **2–12 seconds** play correctly
-- After that, playback becomes **glitchy and chopped**
-- Eventually the stream goes silent entirely
-- The amount of "correct time" depends on how much resampling/conversion is in
-  the audio path: more conversion → longer survival (a counter-intuitive
-  signature pointing at a sample-pacing problem)
+Requires macOS 26.5 or later. Universal (Intel and Apple Silicon), signed with
+Developer ID and notarized, so no UDID registration or developer account is
+needed. Note that a Developer ID signature names the signer, which
+`codesign -dvv` shows on the shipped binaries.
 
-This is **specific to the AI-501DA** — other UAC2 devices (e.g. SMSL USB Audio)
-work fine on the same Mac, same OS, same USB controller. The same symptom was
-reported on Intel macOS as far back as El Capitan (2015), so this is a
-decade-old incompatibility, not a Tahoe regression.
+Building from source with your own Apple Developer (Individual) team works
+too — see [Build](#build).
 
-## The Root Cause
+## The problem
 
-The AI-501DA's USB audio bridge is the **TENOR TE8802L (GFEC ASSP8802)** chip.
-Its **explicit-feedback values are unreliable as-is**: applying a raw
-UAC2-spec Q16.16 feedback value directly to OUT-endpoint pacing makes the
-host/device clock loop oscillate and collapse within seconds — which is
-exactly what Apple's generic `usbaudiod` does.
+On macOS the generic USB audio service (`usbaudiod`, successor to
+`AppleUSBAudio.kext`) plays the AI-501DA correctly for 2–12 seconds, then
+degrades into glitches and finally silence. The more resampling sits in the
+audio path, the longer it survives — a counter-intuitive signature that points
+at sample pacing rather than data corruption. Other UAC2 devices work fine on
+the same machine, and the symptom was reported on Intel macOS as far back as
+2015, so this is a decade-old device incompatibility rather than a regression.
 
-Two independent vendors confirm the chip quirk:
+## The root cause
 
-- **TEAC's own macOS driver** (273.4.2 source, APSL 2.0) hard-codes a slow-PLL
-  correction for `VID 0x0644` (`TeacUSBAudioStream.cpp:179–186,
-  m_bGFECASSP8802 = true`).
-- **Linux** ships `tenor_fb_quirk` (formerly `udh01_fb_quirk`) for the same
-  chip family: *"sends wrong feedback frequency values, thus causing the PC to
-  send the samples at a wrong rate, which results in clicks and crackles."*
+The AI-501DA's USB audio bridge is the **TENOR TE8802L (GFEC ASSP8802)**, and
+its explicit-feedback values are unreliable as-is. Applying a raw UAC2-spec
+Q16.16 feedback value directly to OUT-endpoint pacing makes the host/device
+clock loop oscillate and collapse within seconds, which is exactly what
+`usbaudiod` does.
 
-An additional device quirk discovered during this project: in the 24-bit alt
-setting the AI-501DA reports **(actual consumption − 1)** in its feedback
-value, so the true rate is `Ff + 1.0` (Q16.16). All six rates calibrate to
-`(Ff + 1) = rate / 8000` within 0.03 %.
+Two independent vendors confirm the quirk. TEAC's own macOS driver (273.4.2,
+APSL 2.0) hard-codes a slow-PLL correction for VID `0x0644`, and Linux ships
+`tenor_fb_quirk` for the same chip family: *"sends wrong feedback frequency
+values, thus causing the PC to send the samples at a wrong rate, which results
+in clicks and crackles."*
 
-## Architecture (v31)
+This project found one more quirk: in the 24-bit alt setting the device
+reports **(actual consumption − 1)**, so the true rate is `Ff + 1.0` (Q16.16).
+All six rates calibrate to `(Ff + 1) = rate / 8000` within 0.03 %.
 
-The dext owns the **whole USB device**, not just the streaming interface:
+## How it works
 
-1. **Device-level match** — `IOProviderClass IOUSBHostDevice` (VID/PID,
-   `IOProbeScore 100000`) with no `IOMatchCategory`, so the dext outcompetes
-   `AppleUSBHostCompositeDevice` and `usbaudiod` never sees the device.
-2. **Forced reconfiguration** — `SetConfiguration(0)` → `SetConfiguration(1,
-   matchInterfaces=false)` tears down any composite-created interfaces, then
-   the dext opens AudioStreaming IF#3 directly and issues UAC2 clock
-   `SET_CUR`/`GET_CUR` on EP0 (possible only with device ownership).
-3. **24-bit alt setting for everything** — alt2 (6 bytes/frame) for all rates
-   44.1/48/88.2/96/176.4/192 kHz. (alt1 16-bit physically caps at 88.2 kHz:
-   `SET_CUR 96000` claims success but the clock stays at 88.2 kHz.)
-4. **Feedback-paced OUT stream** — EP `0x84 IN` feedback is decoded with the
-   `Ff + 1.0` quirk, sanity-banded to ±12.5 % of nominal, and drives a Q16.16
-   accumulator that emits whole samples per microframe on EP `0x03 OUT`
-   (pipelined, 4 transfers in flight, consecutive frame numbers with resync on
-   slip). Following the DAC's actual consumption keeps its FIFO in the lock
-   window and cancels long-term host/DAC drift.
-5. **CoreAudio bridge (AudioDriverKit)** — `IOUserAudioDevice` named
-   "TEAC AI-501DA", 24-bit LPCM at the six rates. Critical timing contract
-   (learned from the maudio project and bitter experience):
-   - ring buffer length **==** zero-timestamp period (`49152` frames),
-   - ZTS driven by **completed** (on-the-wire) samples with raw
-     `mach_absolute_time()`,
-   - output safety offset scaled to the rate (40 ms).
-   Rate changes arrive via an `IOUserAudioDevice` subclass
-   (`PerformDeviceConfigurationChange` → `ReconfigureForRate`: abort pipes →
-   alt0 → clock `SET_CUR` with read-back verification → alt2 → **re-CopyPipe**
-   → counter/ring/ZTS reset → re-arm).
-6. **Crash-safe teardown (v28/v29)** — `Stop()` quiesces before anything is
-   released: stop flag → interface close (implicit abort) →
-   `OSAction::Cancel` chain (its handler fires only after all in-flight
-   completion callbacks have finished) → release + deferred
-   `Stop(provider, SUPERDISPATCH)`; `ivars` lives until `free()`.
-   Rate switching and completion delivery share one serial dispatch queue
-   (measured, not documented), so the reconfigure path never sleep-waits on
-   completions — instead the last drained completion re-arms the stream
-   (*rearm-after-drain*). This fixed a real SIGSEGV (use-after-free between a
-   queued isoch completion and teardown) captured on 2026-07-04, and the fix
-   is verified by killing the DAC's AC power mid-playback: clean quiesce, no
-   crash report, automatic re-match on power-up.
-7. **Overrun guard** — if the USB reader is about to overtake the CoreAudio
-   writer (divergence accumulated from short frames), the reader re-anchors
-   behind the write position instead of looping stale ring data.
-8. **Underrun silence fill (v30)** — every ring copy is clamped to what
-   CoreAudio has actually written; the remainder is zero-filled. When the
-   supply stops entirely (source app dies mid-stream, stream torn down
-   without a clean stop), the output decays to silence instead of endlessly
-   replaying the last ring-full of stale audio.
-9. **Software volume + mute (v31)** — `IOUserAudioLevelControl` (−60…0 dB,
-   0.5 dB gain table) plus `IOUserAudioBooleanControl`, wired to the macOS
-   volume slider / media keys. Gain is applied to the 24-bit samples in the
-   isoch copy path; unity gain (0 dB, unmuted) bypasses the multiply
-   entirely, preserving the bit-perfect path. The device's UAC2 exposes no
-   Feature Unit — a hardware volume simply does not exist on USB (TEAC's
-   manual states the unit cannot be controlled from the PC).
+- **Device-level match.** The dext matches `IOUSBHostDevice` on VID/PID with
+  `IOProbeScore 100000` and no `IOMatchCategory`, so it outcompetes
+  `AppleUSBHostCompositeDevice` and `usbaudiod` never sees the device. Owning
+  the whole device is what makes UAC2 clock control on EP0 possible.
+- **Forced reconfiguration.** `SetConfiguration(0)` then
+  `SetConfiguration(1, matchInterfaces=false)` tears down composite-created
+  interfaces before the dext opens AudioStreaming IF#3 directly.
+- **24-bit for every rate.** alt2 (6 bytes/frame) is used throughout; the
+  16-bit alt1 physically caps at 88.2 kHz, where `SET_CUR 96000` reports
+  success but the clock does not move.
+- **Feedback-paced output.** Feedback on EP `0x84 IN` is decoded with the
+  `Ff + 1.0` quirk, sanity-banded to ±12.5 % of nominal, and drives a Q16.16
+  accumulator emitting whole samples per microframe on EP `0x03 OUT`, four
+  transfers in flight with resync on frame slip. Following the DAC's real
+  consumption keeps its FIFO in the lock window and cancels long-term drift.
+- **CoreAudio timing contract.** Ring length equals the zero-timestamp period
+  (49152 frames), the timestamp is driven by completed on-the-wire samples
+  with raw `mach_absolute_time()`, and the output safety offset scales with
+  the rate. Getting any of these wrong is audible.
+- **Crash-safe teardown.** `Stop()` quiesces before releasing anything: stop
+  flag, interface close, an `OSAction::Cancel` chain whose handler fires only
+  after every in-flight completion has finished, then release and a deferred
+  superclass `Stop()`. Rate switching and completion delivery share one serial
+  queue, so the reconfigure path never sleep-waits — the last drained
+  completion re-arms the stream instead.
+- **Ring guards.** If the USB reader is about to overtake the CoreAudio
+  writer it re-anchors rather than replaying stale data, and every copy is
+  clamped to what CoreAudio actually wrote, with the remainder zero-filled, so
+  a source that dies mid-stream decays to silence.
+- **Software volume and mute.** The device exposes no UAC2 Feature Unit, so
+  level control lives in the driver, applied to 24-bit samples in the isoch
+  copy path. Unity gain bypasses the multiply entirely, keeping the
+  bit-perfect path intact.
 
-The TEAC slow-PLL port (`ApplyAssp8802Correction`) is retained in the source
-for observation but **disabled** (`ENABLE_ASSP8802_PLL 0`): with the device's
-clock actually synced to USB SOF, the ported PLL converged ~2 samples/s low
-and starved the FIFO. Direct feedback-following (item 4) proved correct.
+The port of TEAC's slow-PLL correction is kept in the source for observation
+but compiled out (`ENABLE_ASSP8802_PLL 0`): with the device clock actually
+synced to USB SOF it converged about two samples per second low and starved
+the FIFO. Direct feedback-following proved correct.
 
-## Findings Worth Recording
+## Notes
 
-- **The AI-501DA does not support DSD/DoP on USB.** Verified in practice
-  (bit-perfect DoP markers delivered and confirmed at the endpoint — DAC never
-  locks; the stock driver behaves the same) and by specification: TEAC's HR
-  Audio Player manual explicitly lists the AI-501DA among models where "DSD
-  playback is not supported"; the TE8802L is PCM-only; the PCM5102 DAC has no
-  DSD input mode. In this product family DSD arrived with the AI-301DA
-  (2014) / UD-501 (different USB front-end: TMS320C6748 + PCM1795). PCM
-  192 kHz / 24-bit is the ceiling — by design, not by driver limitation.
-- **The device firmware itself can hang.** After ~10.5 h of continuous
-  operation the AI-501DA once vanished from the USB bus entirely (no dext
-  involvement — the same long-standing firmware issue reported back in the
-  Intel era). Only an AC power
-  cycle revives it. A host-side watchdog (detect + smart-plug power cycle) is
-  a planned companion, since the dext auto re-matches after re-enumeration.
-- **isoch data buffers are packed contiguously** (`txn[i].offset` accumulates
-  `requestCount`, `wMaxPacketSize` unused) — verified by disassembling the
-  DriverKit kernel shim after a strided-layout experiment produced garbage.
+- **No DSD/DoP.** Confirmed in practice — bit-perfect DoP markers reach the
+  endpoint and the DAC never locks, exactly as with the stock driver — and by
+  specification: TEAC's manual lists the AI-501DA among models without DSD
+  support, the TE8802L is PCM-only, and the PCM5102 has no DSD input mode. In
+  this product family DSD arrived with the AI-301DA and UD-501, which use a
+  different USB front-end. 192 kHz / 24-bit is the hardware ceiling.
+- **The device firmware can hang.** After about 10.5 hours of continuous
+  operation the DAC once vanished from the USB bus with no dext involvement,
+  matching long-standing reports from the Intel era. Only an AC power cycle
+  revives it; the dext re-matches automatically once it re-enumerates.
+- **Isoch data buffers are packed contiguously** (`txn[i].offset` accumulates
+  `requestCount`; `wMaxPacketSize` is unused) — established by disassembling
+  the DriverKit kernel shim after a strided layout produced garbage.
+- **HID remote control looks unavailable.** TEAC's manual states the unit
+  cannot be controlled from a PC and no stock driver touches IF#0.
 
-## Status
-
-| Milestone | Status |
-|---|---|
-| USB device takeover, EP0 clock control | ✅ |
-| Feedback-paced isoch OUT (pipelined ×4) | ✅ |
-| CoreAudio output device, clean playback | ✅ (user-verified "no noise") |
-| All rates 44.1–192 kHz / 24-bit, live rate switching | ✅ (all six rates physically calibrated) |
-| Long soak | ✅ 8 h @ 192 kHz, zero bad/short/overrun/reanchor |
-| Teardown UAF fix + live-unplug crash test | ✅ v28/v29 |
-| Boot-time auto-matching after OS reboot | ✅ wins the race against `usbaudiod` on attempt 1 |
-| DSD/DoP | ❌ Not supported by the hardware (closed) |
-| Hi-res robustness hardening ("cause B": memcpy ring copy, deeper pipeline) | 💤 backlog — not scheduled (no recurrence in the 8 h soak) |
-| Device-hang watchdog (AC power cycle automation) | 💤 backlog — deferred until a device hang is observed again |
-| Underrun silence fill (no stale-ring looping when the source stops) | ✅ v30 |
-| Software volume / mute (0 dB = bit-perfect bypass) | ✅ v31 |
-| Developer ID distribution entitlement (DriverKit + family.audio + USB transport) | ✅ granted by Apple |
-| Developer ID signed + notarized build | ✅ universal, stapled |
-| Install / uninstall from the container app | ✅ v37 |
-| HID remote (IF#0) | 📋 future — research says host control is unlikely (TEAC's manual denies PC control; no stock driver touches HID) |
-
-## Layout
-
-```
-TeacAI501DA/                    Xcode project (dext + installer app)
-├── TeacAI501DA.xcodeproj
-├── TeacAI501DA/
-│   ├── TeacAI501DA.iig         driver class declaration
-│   ├── TeacAI501DA.cpp         driver implementation (~1570 lines)
-│   ├── TeacAI501DADevice.iig   IOUserAudioDevice subclass (rate changes)
-│   ├── TeacAI501DADevice.cpp
-│   ├── TeacAI501DAVolumeControl.iig  IOUserAudioLevelControl subclass (software volume)
-│   ├── TeacAI501DAVolumeControl.cpp
-│   ├── TeacAI501DAMuteControl.iig    IOUserAudioBooleanControl subclass (software mute)
-│   ├── TeacAI501DAMuteControl.cpp
-│   ├── TeacAI501DA.entitlements  (distribution variant: idVendor 1604)
-│   └── Info.plist              IOKitPersonalities (IOUSBHostDevice match)
-└── TeacAI501DAInstaller/       minimal container app
-    ├── main.swift              OSSystemExtensionRequest.activationRequest
-    └── TeacAI501DAInstaller.entitlements
-
-ai501da_lsusb.txt               Full USB descriptor dump of the device
-```
-
-## Build & Deploy
+## Build
 
 ```sh
 cd TeacAI501DA
-# Compile check (unsigned)
+
+# Compile check, no signing
 xcodebuild -scheme TeacAI501DA -configuration Debug CODE_SIGNING_ALLOWED=NO build
 
-# Signed build requires a paid Apple Developer Program team (Individual is
-# fine — DriverKit development entitlements incl. family.audio are granted
-# without per-entitlement review when the entitlements file uses the
-# "development variant" wildcards). A Personal Team cannot provision DriverKit.
+# Development build. Needs a paid Apple Developer Program team; Individual is
+# fine, since DriverKit development entitlements including family.audio are
+# granted without review when the entitlements file uses the development
+# wildcards. A Personal Team cannot provision DriverKit at all.
 xcodebuild -scheme TeacAI501DA -configuration Debug build
 ```
 
-### Build flavors
-
-The default build exposes software volume/mute controls (0 dB = strict
-bit-perfect bypass). A **fixed-volume** flavor — no controls exposed to the
-OS, no gain path compiled in, full-scale passthrough only — builds from the
-same source:
+A **fixed-volume** flavor builds from the same source with no controls exposed
+to the OS and no gain path compiled in, leaving full-scale passthrough only:
 
 ```sh
 xcodebuild -scheme TeacAI501DAInstaller -configuration Debug \
   GCC_PREPROCESSOR_DEFINITIONS='DEBUG=1 TEAC_FIXED_VOLUME=1' build
 ```
 
-Swapping flavors on one machine requires a higher `CFBundleVersion` (the
-system only replaces a dext on upgrade), or a
-`systemextensionsctl uninstall` first.
+macOS replaces a driver extension only when `CFBundleVersion` increases, so
+bump `CURRENT_PROJECT_VERSION` before deploying, or uninstall first.
 
-### Install and uninstall
+### Developer ID build
 
-The container app drives both directions through `OSSystemExtensionRequest`,
-so one bundle covers the whole lifecycle and no second signing identity is
-needed. Launched with no arguments it asks which action to take and reports
-the outcome; `--install` and `--uninstall` run unattended:
-
-```sh
-/Applications/TeacAI501DAInstaller.app/Contents/MacOS/TeacAI501DAInstaller --uninstall
-```
-
-Uninstalling asks for an administrator password and removes the driver
-extension; the app itself can then be moved to the Trash.
-
-### Developer ID (notarized) build
-
-With the DriverKit distribution entitlements granted, the project builds a
-Developer ID signed, notarized dext that loads on any Mac — no per-device
-UDID registration. Both App IDs need the distribution capabilities enabled
-(they are separate portal entries from the `(development)` ones), and the
-Developer ID certificate must be issued under the **G2 sub-CA** (the legacy
-sub-CA expires 2027-02-01 and caps the leaf certificate with it).
+Distribution requires the DriverKit distribution entitlements on both App IDs
+(separate portal entries from the `(development)` ones) and a Developer ID
+certificate issued under the **G2 sub-CA** — the legacy sub-CA expires
+2027-02-01 and caps the leaf certificate with it.
 
 ```sh
 xcodebuild -project TeacAI501DA.xcodeproj \
@@ -241,92 +158,72 @@ xcodebuild -project TeacAI501DA.xcodeproj \
   OTHER_CODE_SIGN_FLAGS=--timestamp \
   ONLY_ACTIVE_ARCH=NO ARCHS="x86_64 arm64" \
   clean build
-```
 
-All three extra settings are required: `Release` and
-`CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO` keep `get-task-allow` out of the
-signature (it is not in a Developer ID profile), and `--timestamp` overrides
-Xcode's default `--timestamp=none`, without which notarization fails with
-*"The signature does not include a secure timestamp."*
-
-```sh
 ditto -c -k --keepParent TeacAI501DAInstaller.app app.zip
 xcrun notarytool submit app.zip --key <AuthKey.p8> --key-id <KeyID> \
   --issuer <IssuerID> --wait
 xcrun stapler staple TeacAI501DAInstaller.app
 ```
 
-Deployment loop (the dext is replaced only when `CFBundleVersion` increases):
+All three extra settings matter. `Release` and
+`CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO` keep `get-task-allow` out of the
+signature, since a Developer ID profile does not carry it, and `--timestamp`
+overrides Xcode's default `--timestamp=none`, without which notarization
+fails with *"The signature does not include a secure timestamp."*
 
-1. bump `CURRENT_PROJECT_VERSION`, build signed,
-2. copy `TeacAI501DAInstaller.app` to `/Applications` and launch it
-   (it asks whether to install/update or uninstall; first install needs the
-   System Settings "Driver Extensions" toggle). `--install` and `--uninstall`
-   skip the prompt for scripted runs,
-3. kill the old dext process if it lingers ("terminating for upgrade" state),
-4. power-cycle / replug the device to re-enumerate.
+## Layout
+
+```
+TeacAI501DA/                     Xcode project (dext + container app)
+├── TeacAI501DA/
+│   ├── TeacAI501DA.{iig,cpp}              driver
+│   ├── TeacAI501DADevice.{iig,cpp}        IOUserAudioDevice subclass, rate changes
+│   ├── TeacAI501DAVolumeControl.{iig,cpp} software volume
+│   ├── TeacAI501DAMuteControl.{iig,cpp}   software mute
+│   ├── TeacAI501DA.entitlements
+│   └── Info.plist                         IOKitPersonalities, IOUSBHostDevice match
+└── TeacAI501DAInstaller/        container app: install, update, uninstall
+
+ai501da_lsusb.txt                full USB descriptor dump
+```
 
 ## Hardware
 
 - TEAC AI-501DA integrated amplifier / DAC (Reference 501 series, 2012)
-- USB audio bridge: TENOR TE8802L (GFEC ASSP8802), USB High-Speed, UAC2
-- DAC: Burr-Brown PCM5102 (PCM-only part — no DSD input mode)
+- USB audio bridge: TENOR TE8802L (GFEC ASSP8802), High-Speed, UAC2
+- DAC: Burr-Brown PCM5102, PCM-only
 - Amplifier: ABLETEC ALC0180 Class-D, 68 W/ch @ 4 Ω
-- Per descriptor: alt1 16-bit / alt2 24-bit, async isochronous with explicit
-  feedback EP (4-byte Q16.16, bInterval 4), two programmable clock sources
-  synced to SOF, SPDIF output terminal layout
+- alt1 16-bit / alt2 24-bit, async isochronous with an explicit feedback
+  endpoint (4-byte Q16.16, bInterval 4), two clock sources synced to SOF
 
 ## References
 
-- TEAC OSS distribution: <https://teac-global.com/support/opensource/form/>
-  (request `AI-501DA_NP-H750` to get the 273.4.2 KEXT source under APSL 2.0)
-- Linux `tenor_fb_quirk`:
+- TEAC OSS distribution — <https://teac-global.com/support/opensource/form/>
+  (request `AI-501DA_NP-H750` for the 273.4.2 KEXT source under APSL 2.0)
+- Linux `tenor_fb_quirk` —
   <https://patchwork.kernel.org/project/alsa-devel/patch/1398939622-29451-1-git-send-email-zonque@gmail.com/>
-- maudio (M-Audio Fast Track Ultra dext — source of the "ZTS period == ring
-  length" contract): <https://github.com/2075/maudio>
-- Apple AudioDriverKit: <https://developer.apple.com/documentation/audiodriverkit>
-- Apple USBDriverKit: <https://developer.apple.com/documentation/usbdriverkit>
-- Karabiner-DriverKit-VirtualHIDDevice (dext signing flow reference):
+- maudio, source of the "ZTS period equals ring length" contract —
+  <https://github.com/2075/maudio>
+- Apple [AudioDriverKit](https://developer.apple.com/documentation/audiodriverkit)
+  and [USBDriverKit](https://developer.apple.com/documentation/usbdriverkit)
+- Karabiner-DriverKit-VirtualHIDDevice, dext signing reference —
   <https://github.com/pqrs-org/Karabiner-DriverKit-VirtualHIDDevice>
-
-## Status of Distribution
-
-Apple granted the DriverKit **distribution** entitlements for this project
-(`com.apple.developer.driverkit`, `.family.audio`, `.transport.usb`), and the
-driver now builds as a Developer ID signed, notarized, universal binary. Such
-a build loads on any Mac without UDID registration, and — because Developer ID
-provisioning profiles are valid 18 years from creation and notarization
-tickets do not expire — it keeps working independently of Apple Developer
-Program membership status.
-
-Notarized universal disk images are published under
-[Releases](https://github.com/soresore19xx/TeacAI501DA/releases). They install
-on any Mac running macOS 26.5 or later, Intel or Apple Silicon, with no UDID
-registration and no developer account. Note that a Developer ID signature
-names the signer, so `codesign -dvv` on the shipped binaries shows the
-author's legal name.
-
-Building from source with your own Apple Developer (Individual) team also
-works — see Build & Deploy above; the licensing in this repository is
-distribution-ready.
 
 ## License
 
-- **Original code** — everything in the `TeacAI501DA/` Xcode project except
-  the fragment noted below — is released under the **MIT License** (see
-  `LICENSE`).
-- **APSL-derived fragment**: `ApplyAssp8802Correction()` in
-  `TeacAI501DA/TeacAI501DA/TeacAI501DA.cpp` is ported from TEAC USB HS Audio
-  Driver 273.4.2 (`TeacUSBAudioStream.cpp`, "Modified by GFEC (TENOR)",
-  Copyright (c) 1998-2010 Apple Computer, Inc.), which TEAC publishes under
-  the **Apple Public Source License 2.0** (full text: `LICENSES/APSL-2.0.txt`).
-  The bundled `ReadMe(GFEC TENOR).txt` in TEAC's source distribution states:
-  *"You may obtain, copy, distribute and modify the source code for any
-  portions of the product under Apple Public Source License."* The fragment is
-  currently compiled for observation only (`ENABLE_ASSP8802_PLL == 0`); the
-  active pacing path is original code.
-- USB descriptors, VID/PID values and protocol behaviour are facts and not
-  subject to copyright.
+Original code is **MIT** (see `LICENSE`).
+
+`ApplyAssp8802Correction()` in `TeacAI501DA/TeacAI501DA/TeacAI501DA.cpp` is
+ported from TEAC USB HS Audio Driver 273.4.2 (`TeacUSBAudioStream.cpp`,
+"Modified by GFEC (TENOR)", Copyright (c) 1998-2010 Apple Computer, Inc.),
+which TEAC publishes under the **Apple Public Source License 2.0** (full text
+in `LICENSES/APSL-2.0.txt`). The bundled `ReadMe(GFEC TENOR).txt` states:
+*"You may obtain, copy, distribute and modify the source code for any portions
+of the product under Apple Public Source License."* That fragment is compiled
+for observation only; the active pacing path is original code.
+
+USB descriptors, VID/PID values and protocol behaviour are facts and not
+subject to copyright.
 
 No warranty. Use at your own risk. **This is an unofficial community driver.
 AI-501DA and TEAC are trademarks of TEAC Corporation; this project is not
