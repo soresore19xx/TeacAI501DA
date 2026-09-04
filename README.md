@@ -22,10 +22,11 @@ scripted runs. The first install needs approval under
 **System Settings > General > Login Items & Extensions > Driver Extensions**,
 after which the DAC must be power-cycled so it re-enumerates.
 
-Requires macOS 26.5 or later. Universal (Intel and Apple Silicon), signed with
-Developer ID and notarized, so no UDID registration or developer account is
-needed. Note that a Developer ID signature names the signer, which
-`codesign -dvv` shows on the shipped binaries.
+Universal for Intel and Apple Silicon, signed with Developer ID and notarized,
+so no UDID registration or developer account is needed. Built for macOS 12 or
+later; verified on macOS 26.5 on Apple Silicon, which is the only combination
+that has been exercised. Older systems and Intel hardware should work but are
+untested — reports welcome.
 
 Building from source with your own Apple Developer (Individual) team works
 too — see [Build](#build).
