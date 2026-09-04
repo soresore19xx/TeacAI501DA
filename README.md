@@ -299,11 +299,16 @@ provisioning profiles are valid 18 years from creation and notarization
 tickets do not expire — it keeps working independently of Apple Developer
 Program membership status.
 
-No public binary release is offered here. A Developer ID signature carries the
-signer's legal name, which this repository deliberately does not publish.
-Other AI-501DA owners can build the project with their own Apple Developer
-(Individual) team — see Build & Deploy above; the licensing in this repository
-is distribution-ready.
+Notarized universal disk images are published under
+[Releases](https://github.com/soresore19xx/TeacAI501DA/releases). They install
+on any Mac running macOS 26.5 or later, Intel or Apple Silicon, with no UDID
+registration and no developer account. Note that a Developer ID signature
+names the signer, so `codesign -dvv` on the shipped binaries shows the
+author's legal name.
+
+Building from source with your own Apple Developer (Individual) team also
+works — see Build & Deploy above; the licensing in this repository is
+distribution-ready.
 
 ## License
 
