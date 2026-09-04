@@ -81,6 +81,7 @@ xcodebuild -project TeacAI501DA.xcodeproj \
   DEVELOPMENT_TEAM=<TeamID> \
   CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
   OTHER_CODE_SIGN_FLAGS=--timestamp \
+  GCC_GENERATE_DEBUGGING_SYMBOLS=NO \
   ONLY_ACTIVE_ARCH=NO ARCHS="x86_64 arm64" \
   clean build
 
@@ -90,11 +91,16 @@ xcrun notarytool submit app.zip --key <AuthKey.p8> --key-id <KeyID> \
 xcrun stapler staple TeacAI501DAInstaller.app
 ```
 
-All three extra settings matter. `Release` and
+Every one of those settings matters. `Release` and
 `CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO` keep `get-task-allow` out of the
-signature, since a Developer ID profile does not carry it, and `--timestamp`
+signature, since a Developer ID profile does not carry it. `--timestamp`
 overrides Xcode's default `--timestamp=none`, without which notarization
-fails with *"The signature does not include a secure timestamp."*
+fails with *"The signature does not include a secure timestamp."* And
+`GCC_GENERATE_DEBUGGING_SYMBOLS=NO` keeps absolute build paths out of the
+shipped binaries — the debug map otherwise records the full source and
+DerivedData paths, which leaks the builder's account name and directory
+layout. `strings` does not surface them, so check with
+`grep -c "$USER" <binary>` rather than by eye.
 
 ## License
 
