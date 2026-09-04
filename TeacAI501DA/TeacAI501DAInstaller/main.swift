@@ -36,16 +36,15 @@ func askForAction() -> Action? {
     let alert = NSAlert()
     alert.messageText = "TEAC AI-501DA Driver"
     alert.informativeText = """
-        インストール / 更新: ドライバを有効にします。初回はシステム設定での承認が必要です。
-        アンインストール: ドライバを削除します。管理者パスワードを求められます。
-
-        Install / Update: activates the driver. The first install needs approval \
+        Install / Update activates the driver. The first install needs approval \
         in System Settings.
-        Uninstall: removes the driver. You will be asked for an administrator password.
+
+        Uninstall removes the driver. You will be asked for an administrator \
+        password.
         """
-    alert.addButton(withTitle: "インストール / 更新")
-    alert.addButton(withTitle: "アンインストール")
-    alert.addButton(withTitle: "キャンセル")
+    alert.addButton(withTitle: "Install / Update")
+    alert.addButton(withTitle: "Uninstall")
+    alert.addButton(withTitle: "Cancel")
     NSApp.activate(ignoringOtherApps: true)
     switch alert.runModal() {
     case .alertFirstButtonReturn:  return .install
@@ -69,27 +68,22 @@ final class RequestDelegate: NSObject, OSSystemExtensionRequestDelegate {
     }
 
     func requestNeedsUserApproval(_ request: OSSystemExtensionRequest) {
-        report("システム設定 > 一般 > ログイン項目と機能拡張 > ドライバ機能拡張 で承認してください。\n\n"
-             + "Approve under System Settings > General > Login Items & Extensions > Driver Extensions.")
+        report("Approve the driver under System Settings > General > "
+             + "Login Items & Extensions > Driver Extensions.")
     }
 
     func request(_ request: OSSystemExtensionRequest,
                  didFinishWithResult result: OSSystemExtensionRequest.Result) {
-        let done = action == .install ? "ドライバを有効にしました。" : "ドライバを削除しました。"
-        let doneEN = action == .install ? "The driver is active." : "The driver has been removed."
         switch result {
         case .completed:
-            var text = "\(done)\n\(doneEN)"
-            if action == .install {
-                text += "\n\nAI-501DA の電源を入れ直すと認識されます。"
-                     + "\nPower-cycle the AI-501DA to let it be picked up."
-            } else {
-                text += "\n\nこのアプリはゴミ箱に入れて構いません。"
-                     + "\nYou can move this app to the Trash."
-            }
+            var text = action == .install ? "The driver is active."
+                                          : "The driver has been removed."
+            text += action == .install
+                ? "\n\nPower-cycle the AI-501DA so it re-enumerates."
+                : "\n\nYou can move this app to the Trash."
             report(text)
         case .willCompleteAfterReboot:
-            report("再起動後に完了します。\nThis completes after you restart the Mac.")
+            report("This completes after you restart the Mac.")
         @unknown default:
             report("RESULT: unknown (\(result.rawValue))")
         }
@@ -97,7 +91,7 @@ final class RequestDelegate: NSObject, OSSystemExtensionRequestDelegate {
     }
 
     func request(_ request: OSSystemExtensionRequest, didFailWithError error: Error) {
-        report("失敗しました / Failed:\n\(error.localizedDescription)", style: .warning)
+        report("Failed: \(error.localizedDescription)", style: .warning)
         exit(1)
     }
 }
