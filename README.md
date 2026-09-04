@@ -153,7 +153,8 @@ and starved the FIFO. Direct feedback-following (item 4) proved correct.
 | Underrun silence fill (no stale-ring looping when the source stops) | ✅ v30 |
 | Software volume / mute (0 dB = bit-perfect bypass) | ✅ v31 |
 | Developer ID distribution entitlement (DriverKit + family.audio + USB transport) | ✅ granted by Apple |
-| Developer ID signed + notarized build | ✅ v36 (universal, stapled) |
+| Developer ID signed + notarized build | ✅ universal, stapled |
+| Install / uninstall from the container app | ✅ v37 |
 | HID remote (IF#0) | 📋 future — research says host control is unlikely (TEAC's manual denies PC control; no stock driver touches HID) |
 
 ## Layout
@@ -209,6 +210,20 @@ Swapping flavors on one machine requires a higher `CFBundleVersion` (the
 system only replaces a dext on upgrade), or a
 `systemextensionsctl uninstall` first.
 
+### Install and uninstall
+
+The container app drives both directions through `OSSystemExtensionRequest`,
+so one bundle covers the whole lifecycle and no second signing identity is
+needed. Launched with no arguments it asks which action to take and reports
+the outcome; `--install` and `--uninstall` run unattended:
+
+```sh
+/Applications/TeacAI501DAInstaller.app/Contents/MacOS/TeacAI501DAInstaller --uninstall
+```
+
+Uninstalling asks for an administrator password and removes the driver
+extension; the app itself can then be moved to the Trash.
+
 ### Developer ID (notarized) build
 
 With the DriverKit distribution entitlements granted, the project builds a
@@ -245,8 +260,9 @@ Deployment loop (the dext is replaced only when `CFBundleVersion` increases):
 
 1. bump `CURRENT_PROJECT_VERSION`, build signed,
 2. copy `TeacAI501DAInstaller.app` to `/Applications` and launch it
-   (sends the activation request; first install needs the System Settings
-   "Driver Extensions" toggle),
+   (it asks whether to install/update or uninstall; first install needs the
+   System Settings "Driver Extensions" toggle). `--install` and `--uninstall`
+   skip the prompt for scripted runs,
 3. kill the old dext process if it lingers ("terminating for upgrade" state),
 4. power-cycle / replug the device to re-enumerate.
 
