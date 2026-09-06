@@ -9,6 +9,11 @@ import AppKit
 import Foundation
 import SystemExtensions
 
+// Line-buffer stdout. Swift block-buffers it when it is not a terminal, so a
+// scripted or LaunchAgent run would otherwise show nothing until the process
+// exits — exactly when the progress messages stop being useful.
+setvbuf(stdout, nil, _IOLBF, 0)
+
 let extensionID = "jp.hogehoge.TeacAI501DA"
 
 enum Action {
