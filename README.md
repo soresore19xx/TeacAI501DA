@@ -28,6 +28,19 @@ later; verified on macOS 26.5 on Apple Silicon, which is the only combination
 that has been exercised. Older systems and Intel hardware should work but are
 untested — reports welcome.
 
+Two flavors are published:
+
+- **Volume** (`*-volume-*.dmg`): volume and mute controls are exposed to
+  macOS as a software gain; at 0 dB the gain path is bypassed for
+  bit-perfect passthrough.
+- **Fixed-volume** (`*-fixed-*.dmg`): no controls are exposed and no gain
+  path is compiled in, so output is always full-scale passthrough. The
+  device has no hardware volume reachable over USB, so use the amplifier's
+  knob or remote.
+
+macOS replaces a driver extension only when `CFBundleVersion` increases, so
+switching to a flavor with a lower version number needs an uninstall first.
+
 Building from source with your own Apple Developer (Individual) team works
 too — see [Build](#build).
 
@@ -91,6 +104,11 @@ xcrun notarytool submit app.zip --key <AuthKey.p8> --key-id <KeyID> \
   --issuer <IssuerID> --wait
 xcrun stapler staple TeacAI501DAInstaller.app
 ```
+
+For the fixed-volume flavor, add
+`GCC_PREPROCESSOR_DEFINITIONS='TEAC_FIXED_VOLUME=1'` to the `xcodebuild` line.
+The Release configuration defines nothing else there, so the override loses
+nothing.
 
 Every one of those settings matters. `Release` and
 `CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO` keep `get-task-allow` out of the
