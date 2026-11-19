@@ -23,7 +23,9 @@ clock loop oscillate and collapse within seconds, which is exactly what
 `usbaudiod` does.
 
 Two independent vendors confirm the quirk. TEAC's own macOS driver (273.4.2,
-APSL 2.0) hard-codes a slow-PLL correction for VID `0x0644`, and Linux ships
+APSL 2.0; its source was obtained officially from TEAC, see the README's
+*Source provenance*) hard-codes a slow-PLL correction for VID `0x0644`, and
+Linux ships
 `tenor_fb_quirk` for the same chip family: *"sends wrong feedback frequency
 values, thus causing the PC to send the samples at a wrong rate, which results
 in clicks and crackles."*

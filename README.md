@@ -7,10 +7,17 @@ cannot play reliably.
 Working and in daily use on macOS 26.5 (Tahoe): all six rates
 44.1–192 kHz at 24-bit, live rate switching, an 8-hour continuous soak at
 192 kHz with zero errors, and a teardown path crash-tested against removing
-the device's AC power mid-stream.
+the device's AC power mid-stream. Current releases are built with Xcode 27.2
+and checked on macOS 27.2.1: playback at 44.1, 96 and 192 kHz, live rate
+switching, volume control, and the underrun silence fill.
 
-Personal, non-commercial reverse-engineering project. Unofficial, and not
-affiliated with TEAC.
+**Based on driver source code officially obtained from TEAC**: the source of
+TEAC USB HS Audio Driver 273.4.2, TEAC's own macOS driver for this device,
+which TEAC provides through its open-source software request form under the
+Apple Public Source License 2.0. See [Source provenance](#source-provenance).
+
+Personal, non-commercial project. Unofficial: not affiliated with, endorsed
+by, or supported by TEAC.
 
 ## Install
 
@@ -24,8 +31,8 @@ after which the DAC must be power-cycled so it re-enumerates.
 
 Universal for Intel and Apple Silicon, signed with Developer ID and notarized,
 so no UDID registration or developer account is needed. Built for macOS 12 or
-later; verified on macOS 26.5 on Apple Silicon, which is the only combination
-that has been exercised. Older systems and Intel hardware should work but are
+later; verified on macOS 27.2 and 26.5 on Apple Silicon, the only combinations
+that have been exercised. Older systems and Intel hardware should work but are
 untested — reports welcome.
 
 Two flavors are published:
@@ -121,12 +128,37 @@ DerivedData paths, which leaks the builder's account name and directory
 layout. `strings` does not surface them, so check with
 `grep -c "$USER" <binary>` rather than by eye.
 
+## Source provenance
+
+This driver is based on source code obtained officially from TEAC. TEAC
+distributes the source of its macOS driver for the AI-501DA, **TEAC USB HS
+Audio Driver 273.4.2** (shared with the NP-H750), through its open-source
+software request form at <https://teac-global.com/support/opensource/form/>
+(model `AI-501DA_NP-H750`), under the Apple Public Source License 2.0. The
+source used here was requested through that form and received directly from
+TEAC in May 2026.
+
+From that source this project takes:
+
+- **The diagnosis.** TEAC's driver hard-codes a slow-PLL feedback correction
+  for exactly this VID/PID (`TeacUSBAudioStream.cpp`). That pointed to the
+  feedback quirk of the device's USB bridge chip, which the generic system
+  driver does not compensate for. [DESIGN.md](DESIGN.md) has the details.
+- **`ApplyAssp8802Correction()`**, ported from that correction (see
+  [License](#license)).
+
+The DriverKit implementation itself (USB device ownership, isochronous pacing,
+the CoreAudio bridge, rate switching, teardown) is not taken from TEAC's
+driver, which is an unsigned 2011 kernel extension that no longer runs on
+current macOS.
+
 ## License
 
 Original code is **MIT** (see `LICENSE`).
 
 `ApplyAssp8802Correction()` in `TeacAI501DA/TeacAI501DA/TeacAI501DA.cpp` is
-ported from TEAC USB HS Audio Driver 273.4.2 (`TeacUSBAudioStream.cpp`,
+ported from the TEAC-provided source of TEAC USB HS Audio Driver 273.4.2
+(`TeacUSBAudioStream.cpp`,
 "Modified by GFEC (TENOR)", Copyright (c) 1998-2010 Apple Computer, Inc.),
 which TEAC publishes under the **Apple Public Source License 2.0** (full text
 in `LICENSES/APSL-2.0.txt`). The bundled `ReadMe(GFEC TENOR).txt` states:
