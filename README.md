@@ -8,8 +8,9 @@ Working and in daily use on macOS 26.5 (Tahoe): all six rates
 44.1–192 kHz at 24-bit, live rate switching, an 8-hour continuous soak at
 192 kHz with zero errors, and a teardown path crash-tested against removing
 the device's AC power mid-stream. Current releases are built with Xcode 27.2
-and checked on macOS 27.2.1: playback at 44.1, 96 and 192 kHz, live rate
-switching, volume control, and the underrun silence fill.
+and checked on macOS 27.2.1 (Apple Silicon) and macOS 12.7.6 (Intel): playback
+at 44.1, 96 and 192 kHz, live rate switching, volume control, and the underrun
+silence fill.
 
 **Based on driver source code officially obtained from TEAC**: the source of
 TEAC USB HS Audio Driver 273.4.2, TEAC's own macOS driver for this device,
@@ -25,14 +26,20 @@ Download the notarized disk image from
 [Releases](https://github.com/soresore19xx/TeacAI501DA/releases), drag the app
 into `/Applications`, and launch it. It asks whether to install or uninstall
 and reports the result; `--install` and `--uninstall` skip the prompt for
-scripted runs. The first install needs approval under
-**System Settings > General > Login Items & Extensions > Driver Extensions**,
-after which the DAC must be power-cycled so it re-enumerates.
+scripted runs. The first install needs approval, after which the DAC must be
+power-cycled so it re-enumerates. Where to approve depends on the macOS
+version (the app's message always names the macOS 15 location):
+
+- macOS 15 or later: **System Settings > General > Login Items & Extensions >
+  Driver Extensions**
+- macOS 13 and 14: **System Settings > Privacy & Security**, then *Allow*
+- macOS 12: **System Preferences > Security & Privacy > General**, unlock,
+  then *Allow*
 
 Universal for Intel and Apple Silicon, signed with Developer ID and notarized,
 so no UDID registration or developer account is needed. Built for macOS 12 or
-later; verified on macOS 27.2 and 26.5 on Apple Silicon, the only combinations
-that have been exercised. Older systems and Intel hardware should work but are
+later; verified on macOS 27.2 and 26.5 on Apple Silicon and on macOS 12.7.6 on
+an Intel MacBook Air (Early 2015). Other combinations should work but are
 untested — reports welcome.
 
 Two flavors are published:
