@@ -8,9 +8,9 @@ Working and in daily use on macOS 26.5 (Tahoe): all six rates
 44.1–192 kHz at 24-bit, live rate switching, an 8-hour continuous soak at
 192 kHz with zero errors, and a teardown path crash-tested against removing
 the device's AC power mid-stream. Current releases are built with Xcode 27.2
-and checked on macOS 27.2.1 (Apple Silicon) and macOS 12.7.6 (Intel): playback
-at 44.1, 96 and 192 kHz, live rate switching, volume control, and the underrun
-silence fill.
+and checked on macOS 27.2.1 (Apple Silicon) and on macOS 15.8.3 and 12.7.6
+(Intel): playback from 44.1 to 192 kHz, live rate switching, volume control,
+and the underrun silence fill.
 
 **Based on driver source code officially obtained from TEAC**: the source of
 TEAC USB HS Audio Driver 273.4.2, TEAC's own macOS driver for this device,
@@ -38,9 +38,9 @@ version (the app's message always names the macOS 15 location):
 
 Universal for Intel and Apple Silicon, signed with Developer ID and notarized,
 so no UDID registration or developer account is needed. Built for macOS 12 or
-later; verified on macOS 27.2 and 26.5 on Apple Silicon and on macOS 12.7.6 on
-an Intel MacBook Air (Early 2015). Other combinations should work but are
-untested — reports welcome.
+later; verified on macOS 27.2 and 26.5 on Apple Silicon and on Intel MacBook
+Airs with macOS 15.8.3 (2020) and macOS 12.7.6 (Early 2015). Other
+combinations should work but are untested — reports welcome.
 
 Two flavors are published:
 
