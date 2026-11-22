@@ -2,15 +2,19 @@
 
 A macOS DriverKit driver extension for the **TEAC AI-501DA** USB DAC
 (VID `0x0644` / PID `0x8038`), which the generic system USB audio driver
-cannot play reliably.
+cannot play reliably. It also drives the **TEAC UD-501** (units with
+TEAC's DSD 11.2 MHz upgrade, `0x0644` / `0x8043`), adding the working
+volume control macOS cannot give it — see
+[TEAC UD-501](#teac-ud-501-upgraded-units). The driver appears in macOS as
+*Unofficial TEAC USB DAC Driver*.
 
 Working and in daily use on macOS 26.5 (Tahoe): all six rates
 44.1–192 kHz at 24-bit, live rate switching, an 8-hour continuous soak at
 192 kHz with zero errors, and a teardown path crash-tested against removing
 the device's AC power mid-stream. Current releases are built with Xcode 27.2
-and checked on macOS 27.2.1 (Apple Silicon) and on macOS 15.8.3 and 12.7.6
-(Intel): playback from 44.1 to 192 kHz, live rate switching, volume control,
-and the underrun silence fill.
+and checked on macOS 27.2.1, 26.7.3, 15.8.3 and 12.7.6 — see
+[Tested macOS versions](#tested-macos-versions). Volume releases up to v43
+had a mute bug — see [Mute state bug up to v43](#mute-state-bug-up-to-v43).
 
 **Based on driver source code officially obtained from TEAC**: the source of
 TEAC USB HS Audio Driver 273.4.2, TEAC's own macOS driver for this device,
@@ -24,7 +28,9 @@ by, or supported by TEAC.
 
 Download the notarized disk image from
 [Releases](https://github.com/soresore19xx/TeacAI501DA/releases), drag the app
-into `/Applications`, and launch it. It asks whether to install or uninstall
+(`Unofficial TEAC USB DAC Driver Installer`; up to v44 it was named
+`TeacAI501DAInstaller`, and the new one updates a driver installed by the
+old one) into `/Applications`, and launch it. It asks whether to install or uninstall
 and reports the result; `--install` and `--uninstall` skip the prompt for
 scripted runs. The first install needs approval, after which the DAC must be
 power-cycled so it re-enumerates. Where to approve depends on the macOS
@@ -38,25 +44,140 @@ version (the app's message always names the macOS 15 location):
 
 Universal for Intel and Apple Silicon, signed with Developer ID and notarized,
 so no UDID registration or developer account is needed. Built for macOS 12 or
-later; verified on macOS 27.2 and 26.5 on Apple Silicon and on Intel MacBook
-Airs with macOS 15.8.3 (2020) and macOS 12.7.6 (Early 2015). Other
-combinations should work but are untested — reports welcome.
+later.
 
-Two flavors are published:
+### Tested macOS versions
 
-- **Volume** (`*-volume-*.dmg`): volume and mute controls are exposed to
-  macOS as a software gain; at 0 dB the gain path is bypassed for
-  bit-perfect passthrough.
-- **Fixed-volume** (`*-fixed-*.dmg`): no controls are exposed and no gain
-  path is compiled in, so output is always full-scale passthrough. The
-  device has no hardware volume reachable over USB, so use the amplifier's
-  knob or remote.
+| Mac | macOS | AI-501DA | UD-501 | Mute fix (v55, v56) |
+|---|---|---|---|---|
+| MacBook Neo (Apple A18 Pro) | 27.2.1 | yes | yes | yes |
+| Mac Studio (2025, Apple M4 Max) | 27.2.1 | yes | yes | yes |
+| Mac mini (2024, Apple M4) | 27.2.1 | yes | yes | yes |
+| Mac mini (2024, Apple M4) | 26.5 | yes, up to v43, in daily use | — | — |
+| MacBook Pro 13-inch (2020, Intel) | 26.7.3 | yes | yes | yes |
+| MacBook Air 13-inch (2020, Intel) | 15.8.3 | yes | yes | yes |
+| MacBook Air 11-inch (Early 2015, Intel) | 12.7.6 | yes | yes | yes |
+
+- *yes* covers playback at every rate the DAC offers (AI-501DA 44.1–192
+  kHz, UD-501 44.1–384 kHz), live rate switching, volume and mute, and the
+  silence fill after a player is killed. Where both DACs are marked, they
+  were also run at the same time.
+- The Mac mini row for macOS 26.5 is from the releases up to v43
+  (AI-501DA only): daily use and the 8-hour soak at 192 kHz.
+- *Mute fix* is the change described in
+  [Mute state bug up to v43](#mute-state-bug-up-to-v43).
+
+Other combinations should work but are untested — reports welcome.
+
+Three flavors are published:
+
+| Disk image | AI-501DA | UD-501 |
+|---|---|---|
+| `*-fixed-*.dmg` | fixed volume | not handled (system driver) |
+| `*-volume-*.dmg` | volume and mute | not handled (system driver) |
+| `*-volume-ud501-*.dmg` | volume and mute | volume and mute |
+
+- **Volume**: volume and mute controls are exposed to macOS as a software
+  gain; at 0 dB the gain path is bypassed for bit-perfect passthrough.
+- **Fixed volume**: no controls are exposed and no gain path is compiled
+  in, so output is always full-scale passthrough. The AI-501DA has no
+  hardware volume reachable over USB, so use the amplifier's knob or
+  remote.
+- **UD-501**: only the `volume-ud501` flavor takes the UD-501 (upgraded
+  units, see [TEAC UD-501](#teac-ud-501-upgraded-units)). With the other two
+  the UD-501 stays with the system driver.
 
 macOS replaces a driver extension only when `CFBundleVersion` increases, so
 switching to a flavor with a lower version number needs an uninstall first.
 
 Building from source with your own Apple Developer (Individual) team works
 too — see [Build](#build).
+
+## TEAC UD-501 (upgraded units)
+
+For UD-501 units that went through TEAC's DSD 11.2 MHz upgrade, which
+identify as `UD-501V2` over USB (`0x0644` / `0x8043`). Units without the
+upgrade are left to the system driver (untested). Tested on one unit, on
+macOS 27.2.1 (Apple M4 Max, Apple M4 and Apple A18 Pro) and on macOS
+26.7.3, 15.8.3 and 12.7.6 (Intel).
+
+The same driver extension gives the unit the volume control macOS cannot:
+the unit's USB Feature Unit accepts volume requests, so the macOS slider
+moves, but the level does not change. The UD-501 is handled by its own
+class (`TeacUD501`), and the AI-501DA object files compile byte-identical
+with and without it.
+
+- **The volume is software, not the unit's hardware volume.** The driver
+  scales the PCM samples digitally (−60 to 0 dB in 0.5 dB steps; mute
+  sends zeros) before they reach the unit, the same kind of control as a
+  player's DSP volume. At 0 dB the driver copies each 24-bit sample into
+  the USB stream unchanged, so the output is bit-perfect for sources of up
+  to 24 bits, provided the player sends them unaltered at their own rate.
+  The stream is 24-bit, so 32-bit sources are reduced to 24 bits before
+  they reach the driver. Below 0 dB the result is limited to the 24-bit
+  resolution the unit declares for this stream (about 19 bits of signal
+  remain at −30 dB). If you want an untouched signal at every setting, keep
+  the slider at maximum and set the level after the DAC, or install the
+  `fixed` or `volume` flavor, which leave the UD-501 to the system driver.
+- PCM 44.1–384 kHz at 24-bit (the rate list is read from the device's
+  clock), live rate switching, and the underrun silence fill.
+- DoP passes through unchanged: any 1 ms chunk carrying DoP markers skips
+  the gain, so DSD keeps playing at any volume setting (the slider has no
+  effect on DSD). DoP at 176.4 and 352.8 kHz is recognised by the unit,
+  whose display shows DSD 2.8 MHz and 5.6 MHz. DSD 11.2 MHz needs the
+  unit's native DSD mode and is not supported.
+- Matching is on the USB product name `UD-501V2`. The UD-503 and the
+  NT-503 share the USB ID but are untested and left to the system driver.
+- The output keeps the stock name `TEAC USB AUDIO DEVICE`, so scripts that
+  select it by name keep working. Its device UID changes, so apps that
+  remember the output by UID need it selected again.
+- To check which driver is in charge, open **System Information**
+  (System Settings > General > About > System Report):
+  - *Software > Extensions* lists `Unofficial TEAC USB DAC Driver`
+    (bundle ID `jp.hogehoge.TeacAI501DA`) with its version, i.e. what is
+    installed.
+  - *Hardware > Audio* shows the manufacturer of `TEAC USB AUDIO DEVICE`
+    as `TEAC (TeacAI501DA driver)` while this driver runs the unit.
+  Right after an install or update the unit stays with the previous
+  driver until it is power-cycled, although Extensions already lists the
+  new version.
+
+## Mute state bug up to v43
+
+Applies to the `volume` and `volume-ud501` flavors. The `fixed` flavor has
+no mute control and was never affected.
+
+Up to v43, the mute state that macOS read back from the driver could be
+wrong. CoreAudio reads the state as a 4-byte value, but the AudioDriverKit
+mute control filled only its lowest byte. The other three bytes were
+leftover memory, so the value was almost never exactly 0 or 1.
+
+- Garbage values were read on every Mac tried, with both the AI-501DA and
+  the UD-501: Intel Macs with macOS 12.7.6, 15.8.3 and 26.7.3, and a
+  MacBook Neo (Apple A18 Pro), a Mac mini (Apple M4) and a Mac Studio
+  (Apple M4 Max) with macOS 27.2.1.
+- The leftover bytes depend on what ran before. An earlier test on the
+  Mac Studio happened to read clean values.
+- The system driver returned a clean value for the UD-501 (checked on the
+  MacBook Pro with macOS 26.7.3).
+
+The symptoms, seen on the Intel Macs, were:
+
+- The output went back to muted by itself after it had been unmuted. This
+  happened after the DAC was power-cycled or reconnected (all three
+  versions), and after every sample-rate change (macOS 15 and 26).
+- macOS reported the mute state wrongly. AppleScript's `get volume
+  settings` said `output muted:false` while the driver was muted, and the
+  menu bar speaker icon could disagree with what you heard.
+
+From v55 (`volume`) and v56 (`volume-ud501`), the driver hands the value
+back as a clean 0 or 1. On all six Macs, mute and unmute now hold across
+rate changes and power cycles, and AppleScript shows the right state (the
+menu bar icon was checked on macOS 26.7.3). Raising the volume while muted
+unmutes the output, as with other devices.
+
+After updating, the output may come up muted once, because macOS saved
+the wrong state earlier. Unmute it once and it stays unmuted.
 
 ## How it works
 
@@ -93,6 +214,10 @@ xcodebuild -scheme TeacAI501DAInstaller -configuration Debug \
   GCC_PREPROCESSOR_DEFINITIONS='DEBUG=1 TEAC_FIXED_VOLUME=1' build
 ```
 
+A plain build also takes the UD-501. To leave it out (as the `fixed` and
+`volume` releases do), add `INFOPLIST_PREPROCESSOR_DEFINITIONS=TEAC_NO_UD501=1`;
+the dext's `Info.plist` is preprocessed and drops the UD-501 personality.
+
 macOS replaces a driver extension only when `CFBundleVersion` increases, so
 bump `CURRENT_PROJECT_VERSION` before deploying, or uninstall first.
 
@@ -119,9 +244,11 @@ xcrun notarytool submit app.zip --key <AuthKey.p8> --key-id <KeyID> \
 xcrun stapler staple TeacAI501DAInstaller.app
 ```
 
-For the fixed-volume flavor, add
-`GCC_PREPROCESSOR_DEFINITIONS='TEAC_FIXED_VOLUME=1'` to the `xcodebuild` line.
-The Release configuration defines nothing else there, so the override loses
+That builds the `volume-ud501` flavor. For the `volume` flavor add
+`INFOPLIST_PREPROCESSOR_DEFINITIONS=TEAC_NO_UD501=1` to the `xcodebuild`
+line, and for the `fixed` flavor add that and
+`GCC_PREPROCESSOR_DEFINITIONS='TEAC_FIXED_VOLUME=1'`. The Release
+configuration defines nothing else in either setting, so the overrides lose
 nothing.
 
 Every one of those settings matters. `Release` and

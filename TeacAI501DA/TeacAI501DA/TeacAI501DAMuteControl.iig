@@ -30,6 +30,13 @@ public:
 
     virtual kern_return_t HandleChangeControlValue(bool in_control_value) override;
 
+    // Returns the control value to the host as a clean 0/1 UInt32. The base
+    // declares this in a private class extension, which iig does not see, so
+    // it cannot carry 'override'; the generated header makes it public virtual.
+    virtual kern_return_t _GetPropertyData(const IOUserAudioObjectPropertyAddress* in_prop_addr,
+                                           OSData* in_qualifier_data,
+                                           OSData** out_data) LOCALONLY;
+
     /*! Back-reference to the driver that owns the gain state. */
     virtual void SetDriverRef(TeacAI501DA* in_driver) LOCALONLY;
 };

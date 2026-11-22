@@ -1,0 +1,38 @@
+//
+//  TeacUD501VolumeControl.iig
+//  TeacAI501DA
+//
+// === Claude origin ===
+// Created/placed by Anthropic Claude Code at: 2026-11-22-133000
+// UD-501V2 software output volume control (the device's Feature Unit volume
+// is accepted but inaudible). One class per .iig — the iig tool derives the
+// generated header name from the class name.
+// ====================
+//
+
+#ifndef TeacUD501VolumeControl_h
+#define TeacUD501VolumeControl_h
+
+#include <AudioDriverKit/IOUserAudioLevelControl.iig>
+
+class TeacUD501;
+
+class LOCALONLY TeacUD501VolumeControl : public IOUserAudioLevelControl
+{
+public:
+    virtual bool init(IOUserAudioDriver* in_driver,
+                      bool in_is_settable,
+                      float in_decibel_value,
+                      IOUserAudioLevelControlRange in_decibel_range,
+                      IOUserAudioObjectPropertyElement in_control_element,
+                      IOUserAudioObjectPropertyScope in_control_scope,
+                      IOUserAudioClassID in_control_class_id) override;
+    virtual void free() override;
+
+    virtual kern_return_t HandleChangeScalarValue(float in_scalar_value) override;
+    virtual kern_return_t HandleChangeDecibelValue(float in_decibel_value) override;
+
+    virtual void SetDriverRef(TeacUD501* in_driver) LOCALONLY;
+};
+
+#endif /* TeacUD501VolumeControl_h */

@@ -30,8 +30,45 @@
 				<string>IOUserAudioDriverUserClient</string>
 			</dict>
 		</dict>
+#ifndef TEAC_NO_UD501
+		<key>TeacUD501-Device</key>
+		<dict>
+			<key>CFBundleIdentifierKernel</key>
+			<string>com.apple.kpi.iokit</string>
+			<key>IOClass</key>
+			<string>IOUserService</string>
+			<key>IOProviderClass</key>
+			<string>IOUSBHostDevice</string>
+			<key>IOUserClass</key>
+			<string>TeacUD501</string>
+			<key>IOUserServerName</key>
+			<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+			<key>idVendor</key>
+			<integer>1604</integer>
+			<key>idProduct</key>
+			<integer>32835</integer>
+			<key>IOPropertyMatch</key>
+			<dict>
+				<key>USB Product Name</key>
+				<string>UD-501V2</string>
+			</dict>
+			<key>IOProbeScore</key>
+			<integer>100000</integer>
+			<key>IOUserAudioDriverUserClientProperties</key>
+			<dict>
+				<key>IOClass</key>
+				<string>IOUserUserClient</string>
+				<key>IOUserClass</key>
+				<string>IOUserAudioDriverUserClient</string>
+			</dict>
+		</dict>
+#endif
 	</dict>
 	<key>OSBundleUsageDescription</key>
-	<string>TEAC AI-501DA USB Audio bridge — reimplements Explicit Feedback handling for stable async isochronous transfer.</string>
+#ifndef TEAC_NO_UD501
+	<string>TEAC AI-501DA / UD-501 USB Audio driver — reimplements Explicit Feedback handling for stable async isochronous transfer.</string>
+#else
+	<string>TEAC AI-501DA USB Audio driver — reimplements Explicit Feedback handling for stable async isochronous transfer.</string>
+#endif
 </dict>
 </plist>

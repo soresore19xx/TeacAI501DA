@@ -69,6 +69,22 @@ All six rates calibrate to `(Ff + 1) = rate / 8000` within 0.03 %.
   level control lives in the driver, applied to 24-bit samples in the isoch
   copy path. Unity gain bypasses the multiply entirely, keeping the
   bit-perfect path intact.
+- **Mute value returned as a clean 0/1.** CoreAudio reads a boolean control
+  as a `UInt32`. AudioDriverKit's `IOUserAudioBooleanControl` fills only the
+  low byte and leaves the other three as leftover memory, so the value is
+  almost never exactly 0 or 1. Seen on every Mac tried (Intel with macOS
+  12.7.6, 15.8.3 and 26.7.3; Apple A18 Pro, M4 and M4 Max with 27.2.1); one
+  earlier test on the M4 Max happened to read clean values. coreaudiod then saves the wrong state and
+  re-applies mute after a rate change or a reconnect, and `get volume
+  settings` reports the state wrongly. Both mute controls
+  (`TeacAI501DAMuteControl`, `TeacUD501MuteControl`) override
+  `_GetPropertyData`, call the base, and for `kAudioBooleanControlPropertyValue`
+  (`'bcvl'`) replace the result with the low byte as 0 or 1. The method is
+  declared in a private class extension that iig does not see, so it is
+  declared `LOCALONLY` without `override` in the `.iig`; the generated header
+  still emits it as an override. The first corrected read per control is
+  logged once. Where the base already returns a clean value, nothing is
+  replaced.
 
 The port of TEAC's slow-PLL correction is kept in the source for observation
 but compiled out (`ENABLE_ASSP8802_PLL 0`): with the device clock actually
@@ -102,12 +118,49 @@ TeacAI501DA/                     Xcode project (dext + container app)
 │   ├── TeacAI501DADevice.{iig,cpp}        IOUserAudioDevice subclass, rate changes
 │   ├── TeacAI501DAVolumeControl.{iig,cpp} software volume
 │   ├── TeacAI501DAMuteControl.{iig,cpp}   software mute
+│   ├── TeacUD501*.{iig,cpp}               UD-501 driver, device, volume, mute
 │   ├── TeacAI501DA.entitlements
 │   └── Info.plist                         IOKitPersonalities, IOUSBHostDevice match
 └── TeacAI501DAInstaller/        container app: install, update, uninstall
 
 ai501da_lsusb.txt                full USB descriptor dump
+ud501v2_lsusb.txt                UD-501 (upgraded) USB descriptor dump (serial removed)
 ```
+
+## UD-501 (upgraded units)
+
+A second personality (`0x0644` / `0x8043`, `IOPropertyMatch` on the USB
+product name `UD-501V2`) starts the `TeacUD501` class from the same dext.
+It follows the AI-501DA design — device-level ownership, pipelined OUT paced
+by explicit feedback, zero timestamps from completed samples, silence fill,
+and the quiesced `Stop` — re-done for a different device:
+
+- The USB side is a TI C67x DSP running TEAC firmware, not the TE8802L. Its
+  feedback is spec-conformant Q16.16 per microframe (exactly nominal at every
+  rate measured), so it is used as-is; a ±1.5% band still guards against
+  malformed values, and a "+1.0" encoding is accepted only if it is the one
+  that lands in band.
+- Topology: AudioControl IF 0 with clock source 41, streaming IF 1 alt 2
+  (24-bit samples MSB-aligned in 4-byte subslots), OUT EP 0x01, feedback EP
+  0x81. The CoreAudio ring stays packed 24-bit; the copy expands each sample
+  into its 4-byte slot.
+- Following Linux's quirks for this USB ID, the start and every rate switch
+  go alt 0 → vendor PCM-mode request (`0x41`, request 0, value 0, index 1) →
+  clock `SET_CUR` → alt 2, with 20 ms after control requests and 50 ms after
+  interface changes for the DSP to settle.
+- Volume is a software gain: the unit's Feature Unit accepts volume
+  requests but the level does not change, so there is no hardware volume
+  to drive. The gain writes 32-bit results into the 4-byte subslot, but
+  alt 2 declares 24-bit resolution, so the effective precision is 24 bits
+  (the low byte is most likely ignored by the unit). Alt 3 declares 32-bit
+  and is untested for PCM. Chunks with a run of 16 DoP marker frames skip the
+  gain; the decision is per chunk with no hold-over, so PCM following DoP at
+  the same rate is attenuated from the next millisecond.
+- Ring and zero-timestamp period are 98304 frames, 256 ms at 384 kHz.
+- Adding the UD-501 did not touch the AI-501DA sources (the later mute fix
+  changed `TeacAI501DAMuteControl` for both devices), and every helper of `TeacUD501`
+  lives in an anonymous namespace so that no same-named symbol can be
+  coalesced with the AI-501DA translation unit at link time.
 
 ## Hardware
 

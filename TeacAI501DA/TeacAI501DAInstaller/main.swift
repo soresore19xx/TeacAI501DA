@@ -30,7 +30,7 @@ func report(_ message: String, style: NSAlert.Style = .informational) {
     guard interactive else { return }
     let alert = NSAlert()
     alert.alertStyle = style
-    alert.messageText = "TEAC AI-501DA Driver"
+    alert.messageText = "Unofficial TEAC USB DAC Driver"
     alert.informativeText = message
     alert.addButton(withTitle: "OK")
     NSApp.activate(ignoringOtherApps: true)
@@ -39,7 +39,7 @@ func report(_ message: String, style: NSAlert.Style = .informational) {
 
 func askForAction() -> Action? {
     let alert = NSAlert()
-    alert.messageText = "TEAC AI-501DA Driver"
+    alert.messageText = "Unofficial TEAC USB DAC Driver"
     alert.informativeText = """
         Install / Update activates the driver. The first install needs approval \
         in System Settings.
@@ -84,7 +84,7 @@ final class RequestDelegate: NSObject, OSSystemExtensionRequestDelegate {
             var text = action == .install ? "The driver is active."
                                           : "The driver has been removed."
             text += action == .install
-                ? "\n\nPower-cycle the AI-501DA so it re-enumerates."
+                ? "\n\nPower-cycle the DAC (AI-501DA or UD-501) so it re-enumerates."
                 : "\n\nYou can move this app to the Trash."
             report(text)
         case .willCompleteAfterReboot:

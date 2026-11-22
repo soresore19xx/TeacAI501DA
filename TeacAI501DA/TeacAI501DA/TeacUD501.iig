@@ -1,0 +1,48 @@
+//
+//  TeacUD501.iig
+//  TeacAI501DA
+//
+// === Claude origin ===
+// Created/placed by Anthropic Claude Code at: 2026-11-22-133000
+// TEAC UD-501V2 (0x0644:0x8043) driver class. Lives in the same dext as the
+// AI-501DA class but shares no code with it: the AI-501DA sources are left
+// untouched so that model cannot regress. Adds software volume/mute because the
+// UD-501V2's Feature Unit volume is accepted but has no audible effect.
+// ====================
+//
+
+#ifndef TeacUD501_h
+#define TeacUD501_h
+
+#include <Availability.h>
+#include <AudioDriverKit/IOUserAudioDriver.iig>
+#include <USBDriverKit/IOUSBHostInterface.iig>
+#include <USBDriverKit/IOUSBHostPipe.iig>
+
+class TeacUD501: public IOUserAudioDriver
+{
+public:
+    virtual kern_return_t Start(IOService * provider) override;
+    virtual kern_return_t Stop(IOService * provider) override;
+    /*! ivars are freed at the final release so late callbacks can still read
+     *  ivars->fStopping (same lifetime rule as the AI-501DA class). */
+    virtual void free() override;
+
+    /*! Completion callback for the explicit feedback EP (0x81 IN, 4 bytes Q16.16). */
+    virtual void
+    FeedbackComplete(OSAction * action, IOReturn status) TYPE(IOUSBHostPipe::CompleteAsyncIsochIO);
+
+    /*! Completion callback for the OUT data EP (0x01, iso async). */
+    virtual void
+    OutComplete(OSAction * action, IOReturn status) TYPE(IOUSBHostPipe::CompleteAsyncIsochIO);
+
+    /*! Switch the USB side to a new sample rate. Called from
+     *  TeacUD501Device::PerformDeviceConfigurationChange (host IO stopped). */
+    virtual kern_return_t ReconfigureForRate(uint32_t in_rate_hz) LOCALONLY;
+
+    /*! Called by the volume/mute controls after the framework committed a value. */
+    virtual void UpdateOutputVolume(float in_decibel) LOCALONLY;
+    virtual void UpdateOutputMute(bool in_muted) LOCALONLY;
+};
+
+#endif /* TeacUD501_h */
