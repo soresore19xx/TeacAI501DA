@@ -3,9 +3,9 @@
 A macOS DriverKit driver extension for the **TEAC AI-501DA** USB DAC
 (VID `0x0644` / PID `0x8038`), which the generic system USB audio driver
 cannot play reliably. It also drives the **TEAC UD-501** (units with
-TEAC's DSD 11.2 MHz upgrade, `0x0644` / `0x8043`), adding the working
-volume control macOS cannot give it — see
-[TEAC UD-501](#teac-ud-501-upgraded-units). The driver appears in macOS as
+TEAC's DSD 11.2 MHz upgrade, `0x0644` / `0x8043`). The UD-501 plays fine
+with macOS's own driver; this driver only adds the working volume control
+macOS cannot give it — see [TEAC UD-501](#teac-ud-501-upgraded-units). The driver appears in macOS as
 *Unofficial TEAC USB DAC Driver*.
 
 Working and in daily use on macOS 26.5 (Tahoe): all six rates
@@ -102,21 +102,30 @@ too — see [Build](#build).
 
 ## TEAC UD-501 (upgraded units)
 
-For UD-501 units that went through TEAC's DSD 11.2 MHz upgrade, which
-identify as `UD-501V2` over USB (`0x0644` / `0x8043`). Units without the
-upgrade are left to the system driver (untested). Tested on one unit, on
-macOS 27.2.1 (Apple M4 Max, Apple M4 and Apple A18 Pro) and on macOS
-26.7.3, 15.8.3 and 12.7.6 (Intel).
+**The UD-501 works with macOS's own USB audio driver.** It is a standard
+USB Audio Class 2.0 device, and you do not need this driver to play it.
 
-The same driver extension gives the unit the volume control macOS cannot:
-the unit's USB Feature Unit accepts volume requests, so the macOS slider
-moves, but the level does not change. Sending the values directly confirms
-it: the unit stores and reports back any volume (−0.5 to −30 dB, on the
-master and on each channel, even an out-of-range value), and the level
-stays the same. TEAC's own Windows driver and HR Audio Player never set it
-either. The UD-501 is handled by its own
-class (`TeacUD501`), and the AI-501DA object files compile byte-identical
-with and without it.
+**Why a driver for it anyway: volume.** The UD-501's line outputs are
+fixed (the front knob sets the headphone level only), and its USB volume
+does not work. The unit declares a volume control (a USB Feature Unit), so
+macOS shows a volume slider for it and the slider moves, but the level
+never changes. Sending the values directly confirms it: the unit stores and
+reports back any volume (−0.5 to −30 dB, on the master and on each channel,
+even an out-of-range value), and the level stays the same. TEAC's own
+Windows driver and HR Audio Player never set it either. With the system
+driver, the level can therefore only be set in the player or after the
+DAC. This driver gives the UD-501 a volume and mute that work from macOS,
+as a software gain (details below). If you do not need that, leave the
+unit to the system driver: install the `fixed` or `volume` flavor, or none
+at all.
+
+Handled units are those that went through TEAC's DSD 11.2 MHz upgrade,
+which identify as `UD-501V2` over USB (`0x0644` / `0x8043`). Units without
+the upgrade are left to the system driver (untested). Tested on one unit,
+on macOS 27.2.1 (Apple M4 Max, Apple M4 and Apple A18 Pro) and on macOS
+26.7.3, 15.8.3 and 12.7.6 (Intel). The UD-501 is handled by its own class
+(`TeacUD501`), and the AI-501DA object files compile byte-identical with
+and without it.
 
 - **The volume is software, not the unit's hardware volume.** The driver
   scales the PCM samples digitally (−60 to 0 dB in 0.5 dB steps; mute
