@@ -54,7 +54,12 @@ All six rates calibrate to `(Ff + 1) = rate / 8000` within 0.03 %.
 - **CoreAudio timing contract.** Ring length equals the zero-timestamp period
   (49152 frames), the timestamp is driven by completed on-the-wire samples
   with raw `mach_absolute_time()`, and the output safety offset scales with
-  the rate. Getting any of these wrong is audible.
+  the rate. Getting any of these wrong is audible. A write that does not
+  continue from the previous write end (the player stopped and restarted)
+  clears the ring between the two before the new end is published;
+  otherwise the stretch below the first new write, which CoreAudio skips
+  because of the safety offset, still holds audio from one ring length
+  earlier and is played (fixed in v66–v68).
 - **Crash-safe teardown.** `Stop()` quiesces before releasing anything: stop
   flag, interface close, an `OSAction::Cancel` chain whose handler fires only
   after every in-flight completion has finished, then release and a deferred
@@ -156,9 +161,12 @@ and the quiesced `Stop` — re-done for a different device:
   and is untested for PCM. Chunks with a run of 16 DoP marker frames skip the
   gain; the decision is per chunk with no hold-over, so PCM following DoP at
   the same rate is attenuated from the next millisecond.
-- Ring and zero-timestamp period are 98304 frames, 256 ms at 384 kHz.
+- Ring and zero-timestamp period are 49152 frames, 128 ms at 384 kHz (98304
+  up to v56; with 98304, CoreAudio waited 2.05 s at 96 kHz and 4.1 s at
+  48 kHz after a rate change before it ran IO again, half that with 49152).
 - Adding the UD-501 did not touch the AI-501DA sources (the later mute fix
-  changed `TeacAI501DAMuteControl` for both devices), and every helper of `TeacUD501`
+  changed `TeacAI501DAMuteControl` for both devices, and the restart fix of
+  v66–v68 changed the IO handler of both), and every helper of `TeacUD501`
   lives in an anonymous namespace so that no same-named symbol can be
   coalesced with the AI-501DA translation unit at link time.
 

@@ -15,6 +15,9 @@ the device's AC power mid-stream. Current releases are built with Xcode 27.2
 and checked on macOS 27.2.1, 26.7.3, 15.8.3 and 12.7.6 — see
 [Tested macOS versions](#tested-macos-versions). Volume releases up to v43
 had a mute bug — see [Mute state bug up to v43](#mute-state-bug-up-to-v43).
+Releases up to v56 could play a fragment of earlier audio when a player
+restarted its output — see
+[Earlier audio on restart up to v56](#earlier-audio-on-restart-up-to-v56).
 
 **Based on driver source code officially obtained from TEAC**: the source of
 TEAC USB HS Audio Driver 273.4.2, TEAC's own macOS driver for this device,
@@ -66,6 +69,10 @@ later.
   (AI-501DA only): daily use and the 8-hour soak at 192 kHz.
 - *Mute fix* is the change described in
   [Mute state bug up to v43](#mute-state-bug-up-to-v43).
+- v66–v68 (the change in
+  [Earlier audio on restart up to v56](#earlier-audio-on-restart-up-to-v56))
+  were checked on the Mac Studio with macOS 27.2.1 only, with both DACs,
+  by recording their analog output. The other Macs were not run again.
 
 Other combinations should work but are untested — reports welcome.
 
@@ -103,7 +110,11 @@ macOS 27.2.1 (Apple M4 Max, Apple M4 and Apple A18 Pro) and on macOS
 
 The same driver extension gives the unit the volume control macOS cannot:
 the unit's USB Feature Unit accepts volume requests, so the macOS slider
-moves, but the level does not change. The UD-501 is handled by its own
+moves, but the level does not change. Sending the values directly confirms
+it: the unit stores and reports back any volume (−0.5 to −30 dB, on the
+master and on each channel, even an out-of-range value), and the level
+stays the same. TEAC's own Windows driver and HR Audio Player never set it
+either. The UD-501 is handled by its own
 class (`TeacUD501`), and the AI-501DA object files compile byte-identical
 with and without it.
 
@@ -178,6 +189,38 @@ unmutes the output, as with other devices.
 
 After updating, the output may come up muted once, because macOS saved
 the wrong state earlier. Unmute it once and it stays unmuted.
+
+## Earlier audio on restart up to v56
+
+Applies to all three flavors and both DACs.
+
+When a player stopped its output and started it again, the first part of
+the new audio could be a fragment of what had played a second or two
+earlier. Roon, for example, restarts its output between tracks of different
+formats, so the end of the previous track seemed to be heard again just
+before the next one.
+
+The cause was in the driver. CoreAudio starts writing a little ahead of the
+current play position (the safety offset), but the driver treated
+everything below the newest write position as written. The stretch between
+the play position and the first new write still held audio from one ring
+length earlier, and the driver played it.
+
+Measured on the Mac Studio with macOS 27.2.1 by recording the DAC's analog
+output with a Focusrite Scarlett 2i2: a 1 kHz tone for 2 s, a 0.6 s stop,
+then digital silence.
+
+| | Before the fix | v66–v68 |
+|---|---|---|
+| UD-501 | 80 ms of the 1 kHz tone at its full level | nothing, in 1 try |
+| AI-501DA | 50 ms and 220 ms (2 of 2 tries) | nothing, in 3 tries |
+
+From v66 (`fixed`), v67 (`volume`) and v68 (`volume-ud501`), a write that
+does not continue from the previous one first clears the ring between the
+two. With the UD-501, v68 also halves the ring (and the zero-timestamp
+period) to 49152 frames, so CoreAudio resumes sooner after a rate change:
+the first audio arrives 1.0 s instead of 2.05 s after a switch to 96 kHz,
+and 2.05 s instead of 4.1 s after a switch to 48 kHz.
 
 ## How it works
 

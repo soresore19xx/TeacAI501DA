@@ -943,7 +943,7 @@ IMPL(TeacAI501DA, Start)
               uint32_t frameSize,
               uint64_t sampleTime,
               uint64_t hostTime) {
-                (void)device; (void)frameSize; (void)hostTime;
+                (void)device; (void)hostTime;
                 // v28: this block fires in AudioDriverKit's RT context and is not
                 // quiesced by cancelling the USB actions. Write nothing once teardown
                 // has begun (ivars stay alive until free(), so reading fStopping is safe).
@@ -952,7 +952,37 @@ IMPL(TeacAI501DA, Start)
                     return kIOReturnSuccess;
                 }
                 if (op == IOUserAudioIOOperationWriteEnd) {
-                    iv->fCoreAudioWriteEndSample = sampleTime + frameSize;
+                    // A write that does not continue where the last one ended (playback was
+                    // stopped and started again, e.g. Roon between tracks): the ring between
+                    // the old end and the new start still holds audio from one ring period
+                    // earlier, and OutComplete treats everything below the write end as
+                    // written, so it played that = a bit of the previous track right before
+                    // the next one (2026-11-23, measured: 50-220 ms at the previous level).
+                    // Clear it before publishing the new end, and log how loud it was.
+                    const uint64_t prevEnd = iv->fCoreAudioWriteEndSample;
+                    const uint64_t newEnd  = sampleTime + frameSize;
+                    if (sampleTime > prevEnd && iv->fCoreAudioBufPtr) {
+                        const uint64_t ringFrames = ZTS_PERIOD_FRAMES;
+                        uint64_t from = prevEnd;
+                        if (newEnd > ringFrames && from < newEnd - ringFrames) {
+                            from = newEnd - ringFrames;
+                        }
+                        uint8_t *ring = (uint8_t *)iv->fCoreAudioBufPtr;
+                        uint32_t stalePeak = 0;
+                        for (uint64_t p = from; p < sampleTime; p++) {
+                            uint8_t *s = ring + (size_t)(p % ringFrames) * OUT_BYTES_PER_SAMPLE;
+                            int16_t l = (int16_t)((uint16_t)s[1] | ((uint16_t)s[2] << 8));
+                            int16_t r = (int16_t)((uint16_t)s[4] | ((uint16_t)s[5] << 8));
+                            uint32_t al = (l < 0) ? (uint32_t)(-(int32_t)l) : (uint32_t)l;
+                            uint32_t ar = (r < 0) ? (uint32_t)(-(int32_t)r) : (uint32_t)r;
+                            if (al > stalePeak) stalePeak = al;
+                            if (ar > stalePeak) stalePeak = ar;
+                            memset(s, 0, OUT_BYTES_PER_SAMPLE);
+                        }
+                        os_log(LOG, LOG_PREFIX "write resumed after a gap: cleared %llu frames before %llu (stale peak %u)",
+                               sampleTime - from, sampleTime, stalePeak);
+                    }
+                    __atomic_store_n(&iv->fCoreAudioWriteEndSample, newEnd, __ATOMIC_RELEASE);
                 }
                 return kIOReturnSuccess;
             });

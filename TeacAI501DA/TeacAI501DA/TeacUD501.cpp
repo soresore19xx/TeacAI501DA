@@ -92,9 +92,12 @@ constexpr uint32_t kMicroframesPerSec  = 8000;
 constexpr uint32_t kCandidateRates[]   = {44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000};
 constexpr uint32_t kNumCandidateRates  = sizeof(kCandidateRates) / sizeof(kCandidateRates[0]);
 
-// ZTS period == ring frames (maudio rule). 98304 frames = 256 ms @384k, the same
-// head room the AI-501DA has at its 192k maximum.
-constexpr uint32_t kZtsPeriodFrames    = 98304;
+// ZTS period == ring frames (maudio rule). v63: 98304 -> 49152 (the AI-501DA's value).
+// After a rate change CoreAudio waits for zero time stamps before it runs IO again, and
+// with 98304 it took 1.1 s @96k / 4.2 s @48k and dropped the first ~1 s @96k (measured
+// 2026-11-23 on studio; the AI-501DA with 49152: 0.5 s / 1.0 s, nothing dropped).
+// 49152 frames = 128 ms @384k, still well above the 40 ms safety offset + one HAL buffer.
+constexpr uint32_t kZtsPeriodFrames    = 49152;
 
 inline uint32_t
 SafetyOffsetForRate(uint32_t rate_hz)
@@ -828,7 +831,37 @@ IMPL(TeacUD501, Start)
                     return kIOReturnSuccess;
                 }
                 if (op == IOUserAudioIOOperationWriteEnd) {
-                    iv->fCoreAudioWriteEndSample = sampleTime + frameSize;
+                    // A write that does not continue where the last one ended (playback was
+                    // stopped and started again, e.g. Roon between tracks): the ring between
+                    // the old end and the new start still holds audio from one ring period
+                    // earlier, and the reader treats everything below the write end as
+                    // written, so it played that = a bit of the previous track right before
+                    // the next one (2026-11-23). Clear it before publishing the new end, and
+                    // log how loud the cleared part was (0 = nothing would have been heard).
+                    const uint64_t prevEnd = iv->fCoreAudioWriteEndSample;
+                    const uint64_t newEnd  = sampleTime + frameSize;
+                    if (sampleTime > prevEnd && iv->fCoreAudioBufPtr) {
+                        const uint64_t ringFrames = kZtsPeriodFrames;
+                        uint64_t from = prevEnd;
+                        if (newEnd > ringFrames && from < newEnd - ringFrames) {
+                            from = newEnd - ringFrames;
+                        }
+                        uint8_t *ring = (uint8_t *)iv->fCoreAudioBufPtr;
+                        uint32_t stalePeak = 0;
+                        for (uint64_t p = from; p < sampleTime; p++) {
+                            uint8_t *s = ring + (size_t)(p % ringFrames) * kRingBytesPerFrame;
+                            int16_t l = (int16_t)((uint16_t)s[1] | ((uint16_t)s[2] << 8));
+                            int16_t r = (int16_t)((uint16_t)s[4] | ((uint16_t)s[5] << 8));
+                            uint32_t al = (l < 0) ? (uint32_t)(-(int32_t)l) : (uint32_t)l;
+                            uint32_t ar = (r < 0) ? (uint32_t)(-(int32_t)r) : (uint32_t)r;
+                            if (al > stalePeak) stalePeak = al;
+                            if (ar > stalePeak) stalePeak = ar;
+                            memset(s, 0, kRingBytesPerFrame);
+                        }
+                        os_log(LOG, LOG_PREFIX "write resumed after a gap: cleared %llu frames before %llu (stale peak %u)",
+                               sampleTime - from, sampleTime, stalePeak);
+                    }
+                    __atomic_store_n(&iv->fCoreAudioWriteEndSample, newEnd, __ATOMIC_RELEASE);
                 }
                 return kIOReturnSuccess;
             });
