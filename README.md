@@ -258,12 +258,12 @@ IO Stopped Context 55391 after 0 frames.
 ```
 
 `HALS_IOUAEngine` belongs to the AudioDriverKit part of coreaudiod. Between
-07:00 and 09:15 on 2026-11-24 the log has 67 starts of an Audio Hijack context
-led by the AI-501DA (two sessions, retries included; v68, then v69), with the
-AI-501DA as the default output for all but about a minute: 42 ended with this
-error, 20 ended after 0 frames without it, and 5 ran (18 s, 2.4 s, and three
-times 512 frames). From 07:00 to 15:00 the error appears for 94 contexts, all
-of Audio Hijack; none of them ran a frame.
+08:04 and 09:06 on 2026-11-24 (v68, then v69) the log has 67 Audio Hijack IO
+contexts whose first device is the AI-501DA, each started while the AI-501DA
+was the default output: 42 have this error and ran no frame, 20 ran no frame
+without it, and 5 ran (68096, 827392 and three times 512 frames). From 07:00
+to 15:00 the error appears for 94 contexts, all of Audio Hijack; none of them
+ran a frame.
 
 **What was tried**, on 2026-11-24 on one Mac (Mac Studio, Apple M4 Max,
 macOS 27.2.1) with Audio Hijack 4.6.1:
@@ -274,7 +274,7 @@ macOS 27.2.1) with Audio Hijack 4.6.1:
 | AI-501DA | UD-501 | Audio Hijack | v69 | plays |
 | RME ADI-2 DAC | AI-501DA | Audio Hijack | v69 | plays |
 | AI-501DA | minimal AudioDriverKit device | Audio Hijack | v72 | IO runs (one try, 7 s) |
-| minimal AudioDriverKit device | the same minimal device | Audio Hijack | v72 | fails, same error |
+| minimal AudioDriverKit device | the same minimal device | Audio Hijack | v72 | fails: 4 contexts ran no frame, 2 of them with the same error |
 | RME Digiface USB | the same Digiface USB | Audio Hijack | v70 | IO runs (one try, 14 s; sound not checked) |
 | AI-501DA | AI-501DA | test program with a Core Audio tap | v68 | runs, 6 of 6 |
 
