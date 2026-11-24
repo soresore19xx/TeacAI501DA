@@ -18,6 +18,10 @@ had a mute bug — see [Mute state bug up to v43](#mute-state-bug-up-to-v43).
 Releases up to v56 could play a fragment of earlier audio when a player
 restarted its output — see
 [Earlier audio on restart up to v56](#earlier-audio-on-restart-up-to-v56).
+One problem is open: an Audio Hijack session with System-Wide Audio nearly
+always fails to start when it plays to the AI-501DA and that is also the
+default output — see
+[Known issue: Audio Hijack with System-Wide Audio](#known-issue-audio-hijack-with-system-wide-audio).
 
 **Based on driver source code officially obtained from TEAC**: the source of
 TEAC USB HS Audio Driver 273.4.2, TEAC's own macOS driver for this device,
@@ -230,6 +234,144 @@ two. With the UD-501, v68 also halves the ring (and the zero-timestamp
 period) to 49152 frames, so CoreAudio resumes sooner after a rate change:
 the first audio arrives 1.0 s instead of 2.05 s after a switch to 96 kHz,
 and 2.05 s instead of 4.1 s after a switch to 48 kHz.
+
+## Known issue: Audio Hijack with System-Wide Audio
+
+Seen with v68 and the later test builds; earlier releases were not tried.
+Playing to the DAC directly and the volume control are not affected.
+
+An Audio Hijack session whose source is *System-Wide Audio* nearly always
+fails to start when it plays to the AI-501DA while the AI-501DA is also the
+default output of macOS. The session looks as if it were running, but its
+timer stays at 0:00. In the session that was checked, its second output did
+not play either. The UD-501 was not tried as both the default output and the
+session's output.
+
+**What the log shows.** coreaudiod reports that the session's IO context is
+already registered, and IO stops before the first frame:
+
+```
+HALS_MultiTap_Engine::RegisterIOContext: registering IOContext 55391
+HALS_IOUAEngine.cpp:132  ... IOContext 55391 is already registered
+HALS_IOUAEngine.cpp:157  Failed to register io thread!
+IO Stopped Context 55391 after 0 frames.
+```
+
+`HALS_IOUAEngine` belongs to the AudioDriverKit part of coreaudiod. Between
+07:00 and 09:15 on 2026-11-24 the log has 67 starts of an Audio Hijack context
+led by the AI-501DA (two sessions, retries included; v68, then v69), with the
+AI-501DA as the default output for all but about a minute: 42 ended with this
+error, 20 ended after 0 frames without it, and 5 ran (18 s, 2.4 s, and three
+times 512 frames). From 07:00 to 15:00 the error appears for 94 contexts, all
+of Audio Hijack; none of them ran a frame.
+
+**What was tried**, on 2026-11-24 on one Mac (Mac Studio, Apple M4 Max,
+macOS 27.2.1) with Audio Hijack 4.6.1:
+
+| Default output | Played to | With | Build | Result |
+|---|---|---|---|---|
+| AI-501DA | AI-501DA | Audio Hijack | v68–v71 | fails (counts above for v68 and v69) |
+| AI-501DA | UD-501 | Audio Hijack | v69 | plays |
+| RME ADI-2 DAC | AI-501DA | Audio Hijack | v69 | plays |
+| AI-501DA | minimal AudioDriverKit device | Audio Hijack | v72 | IO runs (one try, 7 s) |
+| minimal AudioDriverKit device | the same minimal device | Audio Hijack | v72 | fails, same error |
+| RME Digiface USB | the same Digiface USB | Audio Hijack | v70 | IO runs (one try, 14 s; sound not checked) |
+| AI-501DA | AI-501DA | test program with a Core Audio tap | v68 | runs, 6 of 6 |
+
+The minimal device had no USB, no IO operation handler and no controls, but it
+was built into this driver's own extension (a test build of it), not into a
+separate driver. The test program put a global process tap
+(`CATapDescription`) and the AI-501DA into one private aggregate device
+and played silence to it, between failed starts of Audio Hijack on the same
+DAC. It differs from Audio Hijack in at least one way: it asks for tap
+auto-start (`kAudioAggregateDeviceTapAutoStartKey`). The log has
+`register_autostart_context` for each of its runs and for none of the 94
+failed contexts. The log also has "Client is not granted access to the tap"
+for each of its runs; the captured level was checked in two of the six, and
+both had audio. The minimal device was not tried with the test program.
+
+**What follows from it.**
+
+- The failure does not need this driver's USB, IO handler or control code,
+  since the minimal device fails too. Another AudioDriverKit driver was not
+  tried, so it is not shown that this driver is uninvolved. Turning prewarming
+  off (v70), removing the IO operation handler (v71) and a shorter ring (v69)
+  did not stop the failure.
+- It was seen only with AudioDriverKit devices. The Digiface is not one (see
+  [the next section](#how-other-audio-drivers-are-built)); it is the only
+  other product tried in both roles, once.
+- It was seen only with Audio Hijack. Which part of its setup matters, and
+  whether the change is needed in macOS or in Audio Hijack, is open.
+
+Reported to Apple (FB25705511) and to Rogue Amoeba on 2026-11-24. A search on
+the same day found no public report of the same failure. It covered web
+searches (English, one in Japanese), GitHub issue search, the thread titles on
+the first two pages of the AudioDriverKit tag of the Apple Developer Forums,
+the release notes of Audio Hijack and Loopback, and some of Rogue Amoeba's
+support articles and blog posts. The closest is
+[a 2021 forum thread](https://developer.apple.com/forums/thread/694795)
+(FB9778734) about Apple's AudioDriverKit sample on macOS 12.0.1. It ends in
+the same "Failed to register io thread!" and error 2003329396, but starts with
+"Failed to register event link" and mentions no tap; there, setting an IO
+operation handler helped, and this driver already has one. Feedback Assistant
+lists 11 or more similar reports for FB25705511; whether they describe the
+same failure is not known.
+
+**Workaround (v78, a local build, not released).** The driver publishes a
+second device per DAC, named "(Direct)", that serves as the default output.
+The captured and the played device then differ:
+
+| | Default output of macOS | Output Device block in Audio Hijack |
+|---|---|---|
+| AI-501DA | `TEAC AI-501DA (Direct)` | `TEAC AI-501DA` |
+| UD-501 | `TEAC USB AUDIO DEVICE (Direct)` | `TEAC USB AUDIO DEVICE` |
+
+- "(Direct)" sends nothing to the DAC; only the session's output reaches it.
+  With the session stopped there is no sound; to play without Audio Hijack,
+  select the main device as the default output.
+- Volume and mute of "(Direct)" mirror the main device, so the menu bar and
+  the volume keys control the DAC. The sample rate of each follows the other.
+- The session must have no block for a "(Direct)" device, not even a disabled
+  one: one failed start (14:25) was led by the device of a disabled block.
+
+With v78 on the Mac Studio, volume with the AI-501DA, and switching to and
+volume with the UD-501, were confirmed in use. This is a stopgap, to be dropped once it is no longer needed; the published builds stay
+at v68.
+
+## How other audio drivers are built
+
+A driver for a USB audio device has two jobs: moving the data over USB, and
+presenting an audio device to coreaudiod. This driver does both in one
+DriverKit extension, the second with AudioDriverKit. The other products on
+the same Mac Studio (macOS 27.2.1) do not use AudioDriverKit. Read on
+2026-11-24 from Core Audio's plug-in list, the I/O Registry, and the linked
+frameworks and entitlements of the installed drivers:
+
+| Product | USB side | Audio device for coreaudiod |
+|---|---|---|
+| **This driver** (AI-501DA, UD-501) | DriverKit extension (USBDriverKit) | **the same extension, through AudioDriverKit** |
+| RME Digiface USB | DriverKit extension `de.rme-audio.dkusb` 1.0.59 (USBDriverKit) | Audio Server plug-in `RMEUsbAsp.driver` 1.0.22 |
+| MOTU LP32 | DriverKit extension `com.motu.driver.pro.audio.dext` 2.0.2 (USBDriverKit, PCIDriverKit) | Audio Server plug-in `MOTUProAudioServerPlugin.driver` 2.0.2 |
+| Run by macOS's own driver: Topping DX7s and D50, SMSL, RME ADI-2 DAC, Focusrite Scarlett 2i2 | `usbaudiod`, an ordinary process (IOUSBHost) | `usbaudiod` |
+
+Other vendors were not looked at.
+
+- **Both designs are Apple's.** [WWDC21](https://developer.apple.com/videos/play/wwdc2021/10190/)
+  describes the plug-in plus DriverKit extension as the macOS 11 design and
+  AudioDriverKit as its successor: "Starting in macOS Monterey, you only need
+  a dext, no more plug-in." The plug-in interface is "not deprecated". Why
+  RME and MOTU use a plug-in is not known here.
+- **Path in coreaudiod.** The error above comes from `HALS_IOUAEngine`, in the
+  AudioDriverKit part of coreaudiod. It did not appear with the Digiface; the
+  MOTU and the devices run by `usbaudiod` were not tried in both roles.
+- **Entitlements.** AudioDriverKit brings its own connection between
+  coreaudiod and the extension, covered by
+  `com.apple.developer.driverkit.family.audio`. A plug-in has to open the
+  extension's user client, which takes a different entitlement: RME's extension has
+  `com.apple.developer.driverkit.allow-any-userclient-access`, MOTU's plug-in
+  has `com.apple.developer.driverkit.userclient-access` for its extension.
+- **Moving this driver to that design** would mean splitting it in two, with
+  a new plug-in for the audio half, and one of those entitlements.
 
 ## How it works
 
