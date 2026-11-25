@@ -265,8 +265,9 @@ without it, and 5 ran (68096, 827392 and three times 512 frames). From 07:00
 to 15:00 the error appears for 94 contexts, all of Audio Hijack; none of them
 ran a frame.
 
-**What was tried**, on 2026-11-24 on one Mac (Mac Studio, Apple M4 Max,
-macOS 27.2.1) with Audio Hijack 4.6.1:
+**What was tried**, on 2026-11-24, and again with the test program on
+2026-11-26, on one Mac (Mac Studio, Apple M4 Max, macOS 27.2.1) with Audio
+Hijack 4.6.1:
 
 | Default output | Played to | With | Build | Result |
 |---|---|---|---|---|
@@ -276,19 +277,35 @@ macOS 27.2.1) with Audio Hijack 4.6.1:
 | AI-501DA | minimal AudioDriverKit device | Audio Hijack | v72 | IO runs (one try, 7 s) |
 | minimal AudioDriverKit device | the same minimal device | Audio Hijack | v72 | fails: 4 contexts ran no frame, 2 of them with the same error |
 | RME Digiface USB | the same Digiface USB | Audio Hijack | v70 | IO runs (one try, 14 s; sound not checked) |
-| AI-501DA | AI-501DA | test program with a Core Audio tap | v68 | runs, 6 of 6 |
+| AI-501DA | AI-501DA | test program, global tap, auto-start on | v68 | runs, 6 of 6 (2026-11-24) and 4 of 4 (2026-11-26) |
+| AI-501DA | AI-501DA | test program, global tap, auto-start off | v68 | runs, 8 of 8 (2026-11-26) |
+| AI-501DA | AI-501DA | test program, tap for the AI-501DA, auto-start off | v68 | fails, 24 of 24 (2026-11-26), same error |
+| AI-501DA | AI-501DA | test program, tap for the AI-501DA, auto-start on | v68 | `AudioDeviceStart` returns 0, but no callback, 4 of 4 (2026-11-26), same error |
 
 The minimal device had no USB, no IO operation handler and no controls, but it
 was built into this driver's own extension (a test build of it), not into a
-separate driver. The test program put a global process tap
-(`CATapDescription`) and the AI-501DA into one private aggregate device
-and played silence to it, between failed starts of Audio Hijack on the same
-DAC. It differs from Audio Hijack in at least one way: it asks for tap
-auto-start (`kAudioAggregateDeviceTapAutoStartKey`). The log has
-`register_autostart_context` for each of its runs and for none of the 94
-failed contexts. The log also has "Client is not granted access to the tap"
-for each of its runs; the captured level was checked in two of the six, and
-both had audio. The minimal device was not tried with the test program.
+separate driver. The minimal device was not tried with the test program.
+
+The test program puts a process tap (`CATapDescription`) and the AI-501DA into
+one private aggregate device and plays silence to it. On 2026-11-24 the tap
+was global and asked for auto-start (`kAudioAggregateDeviceTapAutoStartKey`);
+the runs were between failed starts of Audio Hijack on the same DAC. The log
+has `register_autostart_context` for each of them and for none of the 94
+failed contexts. It also has "Client is not granted access to the tap" for
+each of them; the captured level was checked in two of the six, and both had
+audio.
+
+The debug log of Audio Hijack (2026-11-25) shows a tap for the AI-501DA, by
+device UID, and auto-start off. On 2026-11-26 the program, rewritten as a small
+signed app, was run with a global tap and with a tap for the AI-501DA
+(`excludingProcesses:deviceUID:stream:`), 4 starts per setting, Audio Hijack
+not running. Auto-start off alone does not make it fail: the global tap ran
+with auto-start off too, 4 starts with a test tone playing on the AI-501DA (the
+tap captured it) and 4 without. The tap for the AI-501DA failed in all 24
+starts with auto-start off (with and without the tone; plain, with drift
+compensation and excluded processes, and with those and muting). coreaudiod
+logged "already registered" for all 28 starts with the tap for the AI-501DA and
+for none of the 12 with the global tap.
 
 **What follows from it.**
 
@@ -300,8 +317,10 @@ both had audio. The minimal device was not tried with the test program.
 - It was seen only with AudioDriverKit devices. The Digiface is not one (see
   [the next section](#how-other-audio-drivers-are-built)); it is the only
   other product tried in both roles, once.
-- It was seen only with Audio Hijack. Which part of its setup matters, and
-  whether the change is needed in macOS or in Audio Hijack, is open.
+- Audio Hijack is not needed for it: with a tap made for the AI-501DA the test
+  program fails the same way, and with a global tap it does not. The test
+  program was not tried with another device or on another Mac. Whether the
+  change is needed in macOS, in this driver or in Audio Hijack is open.
 
 Reported to Apple (FB25705511) and to Rogue Amoeba on 2026-11-24. A search on
 the same day found no public report of the same failure. It covered web
