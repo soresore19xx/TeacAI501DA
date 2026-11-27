@@ -43,6 +43,7 @@
 
 #include "TeacUD501.h"
 #include "TeacUD501Device.h"
+#include "TeacUD501DirectDevice.h"
 #include "TeacUD501VolumeControl.h"
 #include "TeacUD501MuteControl.h"
 
@@ -97,7 +98,24 @@ constexpr uint32_t kNumCandidateRates  = sizeof(kCandidateRates) / sizeof(kCandi
 // with 98304 it took 1.1 s @96k / 4.2 s @48k and dropped the first ~1 s @96k (measured
 // 2026-11-23 on studio; the AI-501DA with 49152: 0.5 s / 1.0 s, nothing dropped).
 // 49152 frames = 128 ms @384k, still well above the 40 ms safety offset + one HAL buffer.
-constexpr uint32_t kZtsPeriodFrames    = 49152;
+// v69: the ring (== ZTS period) is sized per rate. A new IO context does not run until
+// the next zero time stamp, so with 49152 frames a client waited up to 1.02 s @48k for
+// its first cycle and Audio Hijack gave up on the device (2026-11-24). Each size keeps
+// at least the 128 ms of 49152 frames at 384k. The host gets a sub-range of one buffer.
+constexpr uint32_t kRingMaxFrames      = 49152;
+// v78: "(Direct)" is a silent sink (true = mix it into the USB stream as in v77)
+constexpr bool     kDirectMixIntoUsb   = false;
+constexpr uint32_t kNumRingSizes       = 4;
+constexpr uint32_t kRingSizes[kNumRingSizes] = {8192, 16384, 32768, 49152};
+
+inline uint32_t
+RingIndexForRate(uint32_t rate_hz)
+{
+    if (rate_hz <= 48000)  return 0;   // 186 ms @44.1k / 171 ms @48k
+    if (rate_hz <= 96000)  return 1;   // 186 ms @88.2k / 171 ms @96k
+    if (rate_hz <= 192000) return 2;   // 186 ms @176.4k / 171 ms @192k
+    return 3;                          // 139 ms @352.8k / 128 ms @384k
+}
 
 inline uint32_t
 SafetyOffsetForRate(uint32_t rate_hz)
@@ -242,9 +260,30 @@ struct TeacUD501_IVars
     volatile uint32_t         fVolumeGainQ16;
     volatile bool             fOutputMuted;
     uint64_t                  fDopChunks;       // chunks that bypassed the gain because they carried DoP
-    IOBufferMemoryDescriptor *fCoreAudioBuf;
+    IOBufferMemoryDescriptor *fCoreAudioBuf;     // kRingMaxFrames of storage
     void                     *fCoreAudioBufPtr;
-    size_t                    fCoreAudioBufLen;
+    size_t                    fCoreAudioBufLen;  // bytes of the current ring
+    IOMemoryDescriptor       *fRingDescs[kNumRingSizes];   // v69: host-visible sub-ranges
+    uint32_t                  fRingFrames;       // current ring frames == ZTS period
+    // "(Direct)": second output device on the same DAC, mixed into the USB stream
+    // (an AudioDriverKit device that is both the System-Wide Audio tap source and the
+    // output of one aggregate fails in coreaudiod; see the AI-501DA class).
+    // v78: a silent sink unless kDirectMixIntoUsb; volume/mute mirror the main controls.
+    IOUserAudioDevice        *fDirectDevice;
+    TeacUD501VolumeControl   *fDirectVolumeControl;
+    TeacUD501MuteControl     *fDirectMuteControl;
+    IOUserAudioStream        *fDirectStream;
+    IOBufferMemoryDescriptor *fDirectBuf;           // kRingMaxFrames of storage
+    void                     *fDirectBufPtr;
+    IOMemoryDescriptor       *fDirectRingDescs[kNumRingSizes];
+    uint32_t                  fDirectRingFrames;
+    volatile uint32_t         fDirectRateHz;
+    volatile uint32_t         fPendingMainRate;
+    uint64_t                  fDirectWriteEndSample;
+    uint64_t                  fDirectWriteEnds;
+    uint64_t                  fDirectMixedFrames;
+    uint64_t                  fLastZtsSample;
+    uint64_t                  fLastZtsHost;
 
     // USB <-> CoreAudio bridging
     uint64_t                  fUsbCumulativeSamples;
@@ -571,7 +610,8 @@ IMPL(TeacUD501, Start)
     if (!ivars) {
         return kIOReturnNoMemory;
     }
-    ivars->fNextZtsSample = kZtsPeriodFrames;
+    ivars->fRingFrames = kRingSizes[RingIndexForRate(kBaselineRate)];
+    ivars->fNextZtsSample = ivars->fRingFrames;
     ivars->fRateHz = kBaselineRate;
     ivars->fFbCurrentQ16 = NominalFbQ16(kBaselineRate);
     ivars->fSamplesPerUF = kBaselineRate / kMicroframesPerSec;
@@ -659,6 +699,8 @@ IMPL(TeacUD501, Start)
         ivars->fRateHz = ivars->fRates[0];
         ivars->fFbCurrentQ16 = NominalFbQ16(ivars->fRateHz);
     }
+    ivars->fRingFrames = kRingSizes[RingIndexForRate(ivars->fRateHz)];   // v69
+    ivars->fNextZtsSample = ivars->fRingFrames;
     SendClockSampleRate(this, device, ivars->fRateHz);
     ret = SelectAlt(iface, kStreamingAlt);
     if (ret != kIOReturnSuccess) {
@@ -708,7 +750,7 @@ IMPL(TeacUD501, Start)
         OSString *manufactUID = OSString::withCString("TEAC (TeacAI501DA driver)");
 
         TeacUD501Device *dev = OSTypeAlloc(TeacUD501Device);
-        if (!dev || !dev->init(this, true, deviceUID, modelUID, manufactUID, kZtsPeriodFrames)) {
+        if (!dev || !dev->init(this, true, deviceUID, modelUID, manufactUID, ivars->fRingFrames)) {
             os_log(LOG, LOG_PREFIX "TeacUD501Device init failed");
             OSSafeReleaseNULL(dev);
             OSSafeReleaseNULL(deviceUID);
@@ -735,20 +777,38 @@ IMPL(TeacUD501, Start)
             ivars->fAudioDevice->SetOutputSafetyOffset(SafetyOffsetForRate(ivars->fRateHz));
         }
 
-        ivars->fCoreAudioBufLen = (size_t)kZtsPeriodFrames * kRingBytesPerFrame;
+        // v69: storage for the largest ring; the host gets a sub-range sized for the
+        // current rate (fRingDescs), still exactly one ZTS period long.
         ret = IOBufferMemoryDescriptor::Create(kIOMemoryDirectionInOut,
-                                               ivars->fCoreAudioBufLen, 64, &ivars->fCoreAudioBuf);
+                                               (uint64_t)kRingMaxFrames * kRingBytesPerFrame,
+                                               64, &ivars->fCoreAudioBuf);
         if (ret != kIOReturnSuccess) goto fail_audio;
+        ivars->fCoreAudioBuf->SetLength((uint64_t)kRingMaxFrames * kRingBytesPerFrame);
         {
             IOAddressSegment seg;
             if (ivars->fCoreAudioBuf->GetAddressRange(&seg) == kIOReturnSuccess) {
                 ivars->fCoreAudioBufPtr = (void *)seg.address;
-                memset(ivars->fCoreAudioBufPtr, 0, ivars->fCoreAudioBufLen);
+                memset(ivars->fCoreAudioBufPtr, 0, (size_t)kRingMaxFrames * kRingBytesPerFrame);
             }
         }
+        for (uint32_t i = 0; i < kNumRingSizes; i++) {
+            ret = IOMemoryDescriptor::CreateSubMemoryDescriptor(kIOMemoryDirectionInOut, 0,
+                      (uint64_t)kRingSizes[i] * kRingBytesPerFrame,
+                      ivars->fCoreAudioBuf, &ivars->fRingDescs[i]);
+            if (ret != kIOReturnSuccess || !ivars->fRingDescs[i]) {
+                os_log(LOG, LOG_PREFIX "CreateSubMemoryDescriptor(%u frames) failed (0x%x)",
+                       kRingSizes[i], ret);
+                if (ret == kIOReturnSuccess) ret = kIOReturnNoMemory;
+                goto fail_audio;
+            }
+        }
+        ivars->fCoreAudioBufLen = (size_t)ivars->fRingFrames * kRingBytesPerFrame;
+        os_log(LOG, LOG_PREFIX "ring %u frames (== ZTS period) for %u Hz",
+               ivars->fRingFrames, ivars->fRateHz);
 
         auto streamSp = IOUserAudioStream::Create(this,
-                            IOUserAudioStreamDirection::Output, ivars->fCoreAudioBuf);
+                            IOUserAudioStreamDirection::Output,
+                            ivars->fRingDescs[RingIndexForRate(ivars->fRateHz)]);
         if (!streamSp.get()) {
             ret = kIOReturnNoResources;
             goto fail_audio;
@@ -841,7 +901,7 @@ IMPL(TeacUD501, Start)
                     const uint64_t prevEnd = iv->fCoreAudioWriteEndSample;
                     const uint64_t newEnd  = sampleTime + frameSize;
                     if (sampleTime > prevEnd && iv->fCoreAudioBufPtr) {
-                        const uint64_t ringFrames = kZtsPeriodFrames;
+                        const uint64_t ringFrames = iv->fRingFrames;   // v69: per rate
                         uint64_t from = prevEnd;
                         if (newEnd > ringFrames && from < newEnd - ringFrames) {
                             from = newEnd - ringFrames;
@@ -867,6 +927,123 @@ IMPL(TeacUD501, Start)
             });
     }
 
+    // ---- "(Direct)" output device: same DAC, own ring, mixed into the USB stream ----
+    {
+        OSString *dUID   = OSString::withCString("jp.hogehoge.TeacAI501DA.UD-501V2.device.direct");
+        OSString *dModel = OSString::withCString("UD-501V2");
+        OSString *dMfr   = OSString::withCString("TEAC (TeacAI501DA driver)");
+        ivars->fDirectRateHz = ivars->fRateHz;
+        ivars->fDirectRingFrames = kRingSizes[RingIndexForRate(ivars->fDirectRateHz)];
+        TeacUD501DirectDevice *ddev = OSTypeAlloc(TeacUD501DirectDevice);
+        if (ddev && !ddev->init(this, true, dUID, dModel, dMfr, ivars->fDirectRingFrames)) {
+            OSSafeReleaseNULL(ddev);
+        }
+        OSSafeReleaseNULL(dUID); OSSafeReleaseNULL(dModel); OSSafeReleaseNULL(dMfr);
+        kern_return_t dr = kIOReturnNoResources;
+        if (ddev) {
+            ddev->SetDriverRef(this);
+            ivars->fDirectDevice = ddev;
+            {
+                double rates[kNumCandidateRates];
+                for (uint32_t i = 0; i < ivars->fNumRates; i++) rates[i] = (double)ivars->fRates[i];
+                ivars->fDirectDevice->SetAvailableSampleRates(rates, ivars->fNumRates);
+            }
+            ivars->fDirectDevice->SetSampleRate((double)ivars->fDirectRateHz);
+            ivars->fDirectDevice->SetTransportType(IOUserAudioTransportType::USB);
+            ivars->fDirectDevice->SetCanBeDefaultOutputDevice(true);
+            ivars->fDirectDevice->SetCanBeDefaultSystemOutputDevice(false);
+            ivars->fDirectDevice->SetOutputSafetyOffset(SafetyOffsetForRate(ivars->fDirectRateHz));
+            const uint64_t dMax = (uint64_t)kRingMaxFrames * kRingBytesPerFrame;
+            dr = IOBufferMemoryDescriptor::Create(kIOMemoryDirectionInOut, dMax, 64, &ivars->fDirectBuf);
+            if (dr == kIOReturnSuccess) {
+                ivars->fDirectBuf->SetLength(dMax);
+                IOAddressSegment seg;
+                if (ivars->fDirectBuf->GetAddressRange(&seg) == kIOReturnSuccess) {
+                    ivars->fDirectBufPtr = (void *)seg.address;
+                    memset(ivars->fDirectBufPtr, 0, (size_t)dMax);
+                }
+                for (uint32_t i = 0; i < kNumRingSizes && dr == kIOReturnSuccess; i++) {
+                    dr = IOMemoryDescriptor::CreateSubMemoryDescriptor(kIOMemoryDirectionInOut, 0,
+                             (uint64_t)kRingSizes[i] * kRingBytesPerFrame,
+                             ivars->fDirectBuf, &ivars->fDirectRingDescs[i]);
+                }
+            }
+            if (dr == kIOReturnSuccess) {
+                auto sSp = IOUserAudioStream::Create(this, IOUserAudioStreamDirection::Output,
+                               ivars->fDirectRingDescs[RingIndexForRate(ivars->fDirectRateHz)]);
+                if (sSp.get()) {
+                    ivars->fDirectStream = sSp.get();
+                    ivars->fDirectStream->retain();
+                    IOUserAudioStreamBasicDescription dfmts[kNumCandidateRates];
+                    for (uint32_t i = 0; i < ivars->fNumRates; i++) dfmts[i] = MakeFormat24((double)ivars->fRates[i]);
+                    ivars->fDirectStream->SetAvailableStreamFormats(dfmts, ivars->fNumRates);
+                    IOUserAudioStreamBasicDescription f = MakeFormat24((double)ivars->fDirectRateHz);
+                    ivars->fDirectStream->SetCurrentStreamFormat(&f);
+                    ivars->fDirectDevice->AddStream(ivars->fDirectStream);
+                    OSString *dName = OSString::withCString("TEAC USB AUDIO DEVICE (Direct)");
+                    if (dName) { ivars->fDirectDevice->SetName(dName); OSSafeReleaseNULL(dName); }
+                    dr = AddObject(ivars->fDirectDevice);
+                    // handler after AddObject (same order as the main device)
+                    ivars->fDirectDevice->SetIOOperationHandler(
+                        ^(IOUserAudioObjectID device, IOUserAudioIOOperation op, uint32_t frameSize,
+                          uint64_t sampleTime, uint64_t hostTime) {
+                            (void)device; (void)hostTime;
+                            TeacUD501_IVars *iv = ivars;
+                            if (!iv || iv->fStopping || op != IOUserAudioIOOperationWriteEnd) {
+                                return kIOReturnSuccess;
+                            }
+                            const uint64_t prevEnd = iv->fDirectWriteEndSample;
+                            const uint64_t newEnd  = sampleTime + frameSize;
+                            const uint64_t ring    = iv->fDirectRingFrames;
+                            if (sampleTime > prevEnd && iv->fDirectBufPtr && ring) {
+                                uint64_t from = prevEnd;
+                                if (newEnd > ring && from < newEnd - ring) from = newEnd - ring;
+                                uint8_t *rb = (uint8_t *)iv->fDirectBufPtr;
+                                for (uint64_t q = from; q < sampleTime; q++) {
+                                    memset(rb + (size_t)(q % ring) * kRingBytesPerFrame, 0, kRingBytesPerFrame);
+                                }
+                            }
+                            __atomic_store_n(&iv->fDirectWriteEndSample, newEnd, __ATOMIC_RELEASE);
+                            iv->fDirectWriteEnds++;
+                            return kIOReturnSuccess;
+                        });
+#if !TEAC_FIXED_VOLUME
+                    // v78: same volume/mute on "(Direct)" (see TeacAI501DA.cpp)
+                    if (dr == kIOReturnSuccess && ivars->fVolumeControl && ivars->fMuteControl) {
+                        IOUserAudioLevelControlRange range = { kVolumeMinDb, kVolumeMaxDb };
+                        TeacUD501VolumeControl *dvol = OSTypeAlloc(TeacUD501VolumeControl);
+                        if (dvol && dvol->init(this, true, ivars->fVolumeControl->GetDecibelValue(), range,
+                                               IOUserAudioObjectPropertyElementMain,
+                                               IOUserAudioObjectPropertyScope::Output,
+                                               IOUserAudioClassID::VolumeControl)) {
+                            dvol->SetDriverRef(this);
+                            ivars->fDirectVolumeControl = dvol;
+                            ivars->fDirectDevice->AddControl(dvol);
+                        } else {
+                            OSSafeReleaseNULL(dvol);
+                        }
+                        TeacUD501MuteControl *dmute = OSTypeAlloc(TeacUD501MuteControl);
+                        if (dmute && dmute->init(this, true, ivars->fMuteControl->GetControlValue(),
+                                                 IOUserAudioObjectPropertyElementMain,
+                                                 IOUserAudioObjectPropertyScope::Output,
+                                                 IOUserAudioClassID::MuteControl)) {
+                            dmute->SetDriverRef(this);
+                            ivars->fDirectMuteControl = dmute;
+                            ivars->fDirectDevice->AddControl(dmute);
+                        } else {
+                            OSSafeReleaseNULL(dmute);
+                        }
+                    }
+#endif
+                } else {
+                    dr = kIOReturnNoResources;
+                }
+            }
+        }
+        os_log(LOG, LOG_PREFIX "Direct device %s (ret=0x%x ring=%u)",
+               (dr == kIOReturnSuccess) ? "added" : "FAILED", dr, ivars->fDirectRingFrames);
+    }
+
     ret = Ud501ArmUsbStreaming(ivars);
     if (ret != kIOReturnSuccess) {
         return ret;
@@ -882,7 +1059,16 @@ IMPL(TeacUD501, Start)
 fail_audio:
     OSSafeReleaseNULL(ivars->fVolumeControl);
     OSSafeReleaseNULL(ivars->fMuteControl);
+    OSSafeReleaseNULL(ivars->fDirectVolumeControl);
+    OSSafeReleaseNULL(ivars->fDirectMuteControl);
     OSSafeReleaseNULL(ivars->fOutputStream);
+    OSSafeReleaseNULL(ivars->fDirectStream);
+    for (uint32_t di = 0; di < kNumRingSizes; di++) OSSafeReleaseNULL(ivars->fDirectRingDescs[di]);
+    OSSafeReleaseNULL(ivars->fDirectBuf);
+    OSSafeReleaseNULL(ivars->fDirectDevice);
+    for (uint32_t i = 0; i < kNumRingSizes; i++) {
+        OSSafeReleaseNULL(ivars->fRingDescs[i]);
+    }
     OSSafeReleaseNULL(ivars->fCoreAudioBuf);
     OSSafeReleaseNULL(ivars->fAudioDevice);
 fail_usb:
@@ -1001,6 +1187,11 @@ IMPL(TeacUD501, OutComplete)
                    ivars->fRingGuardReanchors, ivars->fSilenceFilledSamples,
                    ivars->fDopChunks, ivars->fGainQ16);
             ivars->fPeakLevel = 0;
+            if (ivars->fDirectDevice) {
+                os_log(LOG, LOG_PREFIX "Direct: writeEnd=%llu calls=%llu mixed=%llu",
+                       __atomic_load_n(&ivars->fDirectWriteEndSample, __ATOMIC_ACQUIRE),
+                       ivars->fDirectWriteEnds, ivars->fDirectMixedFrames);
+            }
         }
     }
 
@@ -1052,7 +1243,7 @@ IMPL(TeacUD501, OutComplete)
         if (dataBuf->GetAddressRange(&outSeg) == kIOReturnSuccess) {
             uint8_t *out = (uint8_t *)outSeg.address;
             const uint8_t *src = (const uint8_t *)ivars->fCoreAudioBufPtr;
-            const uint64_t ringFrames = kZtsPeriodFrames;
+            const uint64_t ringFrames = ivars->fRingFrames;   // v69: per rate
 
             // reader re-anchor when about to overtake the writer (AI-501DA v25)
             uint64_t writePos = ivars->fCoreAudioWriteEndSample;
@@ -1099,6 +1290,38 @@ IMPL(TeacUD501, OutComplete)
                     o[4] = 0; o[5] = s[3]; o[6] = s[4]; o[7] = s[5];
                 } else {
                     memset(o, 0, kWireBytesPerFrame);
+                }
+            }
+
+            // "(Direct)": add its ring on the same sample axis before the volume, so the
+            // system volume applies to both. A DoP chunk from the main device is left alone.
+            // v78: off by default (kDirectMixIntoUsb) — see TeacAI501DA.cpp DIRECT_MIX_INTO_USB.
+            if (kDirectMixIntoUsb && ivars->fDirectBufPtr && ivars->fDirectRateHz == ivars->fRateHz &&
+                ivars->fDirectRingFrames == ivars->fRingFrames && nFrames > 0 &&
+                !ChunkLooksLikeDoP(out, nFrames)) {
+                const uint64_t dEnd  = __atomic_load_n(&ivars->fDirectWriteEndSample, __ATOMIC_ACQUIRE);
+                const uint64_t dRing = ivars->fDirectRingFrames;
+                const uint8_t *dsrc  = (const uint8_t *)ivars->fDirectBufPtr;
+                for (uint32_t f = 0; f < nFrames; f++) {
+                    const uint64_t smp = startSample + f;
+                    if (smp >= dEnd || smp + dRing < dEnd) continue;
+                    const uint8_t *d = dsrc + (size_t)(smp % dRing) * kRingBytesPerFrame;
+                    uint8_t *o = out + (size_t)f * kWireBytesPerFrame;
+                    ivars->fDirectMixedFrames++;
+                    for (int c = 0; c < 2; c++) {
+                        const uint8_t *dp = d + c * 3;
+                        uint8_t *op = o + c * 4;
+                        int32_t b = (int32_t)(((uint32_t)dp[0] | ((uint32_t)dp[1] << 8) | ((uint32_t)dp[2] << 16)) << 8) >> 8;
+                        if (b == 0) continue;
+                        int32_t a = (int32_t)(((uint32_t)op[1] | ((uint32_t)op[2] << 8) | ((uint32_t)op[3] << 16)) << 8) >> 8;
+                        int32_t v = a + b;
+                        if (v > 8388607) v = 8388607;
+                        if (v < -8388608) v = -8388608;
+                        op[0] = 0;
+                        op[1] = (uint8_t)(v & 0xFF);
+                        op[2] = (uint8_t)((v >> 8) & 0xFF);
+                        op[3] = (uint8_t)((v >> 16) & 0xFF);
+                    }
                 }
             }
 
@@ -1152,8 +1375,15 @@ IMPL(TeacUD501, OutComplete)
 
     // 3) zero timestamp from completed samples, once per period
     if (ivars->fAudioDevice && ivars->fUsbCompletedSamples >= ivars->fNextZtsSample) {
-        ivars->fAudioDevice->UpdateCurrentZeroTimestamp(ivars->fNextZtsSample, mach_absolute_time());
-        ivars->fNextZtsSample += kZtsPeriodFrames;
+        const uint64_t ztsHost = mach_absolute_time();
+        ivars->fAudioDevice->UpdateCurrentZeroTimestamp(ivars->fNextZtsSample, ztsHost);
+        ivars->fLastZtsSample = ivars->fNextZtsSample;
+        ivars->fLastZtsHost = ztsHost;
+        if (ivars->fDirectDevice && ivars->fDirectRateHz == ivars->fRateHz &&
+            ivars->fDirectRingFrames == ivars->fRingFrames) {
+            ivars->fDirectDevice->UpdateCurrentZeroTimestamp(ivars->fNextZtsSample, ztsHost);
+        }
+        ivars->fNextZtsSample += ivars->fRingFrames;
     }
 
     // 4) re-enqueue at the next consecutive frame number
@@ -1254,9 +1484,23 @@ TeacUD501::ReconfigureForRate(uint32_t in_rate_hz)
     ivars->fPeakLevel = 0;
     ivars->fSilenceFilledSamples = 0;
     ivars->fUnderrunActive = false;
-    ivars->fNextZtsSample = kZtsPeriodFrames;
+    // v69: ring and ZTS period follow the rate (allowed here: this runs inside
+    // PerformDeviceConfigurationChange with host IO stopped)
+    {
+        const uint32_t idx = RingIndexForRate(in_rate_hz);
+        if (kRingSizes[idx] != ivars->fRingFrames && ivars->fOutputStream &&
+            ivars->fAudioDevice && ivars->fRingDescs[idx]) {
+            kern_return_t mr = ivars->fOutputStream->SetIOMemoryDescriptor(ivars->fRingDescs[idx]);
+            kern_return_t zr = ivars->fAudioDevice->SetZeroTimeStampPeriod(kRingSizes[idx]);
+            os_log(LOG, LOG_PREFIX "ring %u -> %u frames (== ZTS period) for %u Hz (mem=0x%x zts=0x%x)",
+                   ivars->fRingFrames, kRingSizes[idx], in_rate_hz, mr, zr);
+            ivars->fRingFrames = kRingSizes[idx];
+            ivars->fCoreAudioBufLen = (size_t)kRingSizes[idx] * kRingBytesPerFrame;
+        }
+    }
+    ivars->fNextZtsSample = ivars->fRingFrames;
     if (ivars->fCoreAudioBufPtr) {
-        memset(ivars->fCoreAudioBufPtr, 0, ivars->fCoreAudioBufLen);
+        memset(ivars->fCoreAudioBufPtr, 0, (size_t)kRingMaxFrames * kRingBytesPerFrame);
     }
     if (ivars->fOutputStream) {
         IOUserAudioStreamBasicDescription fmt = MakeFormat24((double)in_rate_hz);
@@ -1264,7 +1508,25 @@ TeacUD501::ReconfigureForRate(uint32_t in_rate_hz)
     }
     if (ivars->fAudioDevice) {
         ivars->fAudioDevice->SetOutputSafetyOffset(SafetyOffsetForRate(in_rate_hz));
-        ivars->fAudioDevice->UpdateCurrentZeroTimestamp(0, mach_absolute_time());
+        const uint64_t anchorHost = mach_absolute_time();
+        ivars->fAudioDevice->UpdateCurrentZeroTimestamp(0, anchorHost);
+        // the USB sample axis restarts at 0: restart "(Direct)" on it as well
+        ivars->fLastZtsSample = 0;
+        ivars->fLastZtsHost = anchorHost;
+        __atomic_store_n(&ivars->fDirectWriteEndSample, 0, __ATOMIC_RELEASE);
+        if (ivars->fDirectBufPtr) {
+            memset(ivars->fDirectBufPtr, 0, (size_t)kRingMaxFrames * kRingBytesPerFrame);
+        }
+        if (ivars->fDirectDevice) {
+            if (ivars->fDirectRateHz == in_rate_hz) {
+                ivars->fDirectDevice->UpdateCurrentZeroTimestamp(0, anchorHost);
+            } else {
+                kern_return_t rq = ivars->fDirectDevice->RequestDeviceConfigurationChange(
+                                       UD501_DIRECT_FOLLOW_ACTION, nullptr);
+                os_log(LOG, LOG_PREFIX "Direct: follow %u -> %u requested (0x%x)",
+                       ivars->fDirectRateHz, in_rate_hz, rq);
+            }
+        }
     }
 
     kern_return_t armRet = Ud501ScheduleRearmAfterDrain(ivars);
@@ -1287,6 +1549,16 @@ TeacUD501::UpdateOutputVolume(float in_decibel)
            (int)in_decibel,
            (uint32_t)((in_decibel - (int)in_decibel) * -10.0f + 0.5f) % 10,
            gain, ivars->fOutputMuted ? 1 : 0);
+    // v78: show the same value on both devices (Set*Value does not call Handle*)
+    TeacUD501VolumeControl *ctls[2] = { ivars->fVolumeControl, ivars->fDirectVolumeControl };
+    for (int i = 0; i < 2; i++) {
+        if (ctls[i]) {
+            float d = ctls[i]->GetDecibelValue() - in_decibel;
+            if (d > 0.01f || d < -0.01f) {
+                ctls[i]->SetDecibelValue(in_decibel);
+            }
+        }
+    }
 }
 
 void
@@ -1299,6 +1571,63 @@ TeacUD501::UpdateOutputMute(bool in_muted)
     uint32_t eff = in_muted ? 0 : __atomic_load_n(&ivars->fVolumeGainQ16, __ATOMIC_RELAXED);
     __atomic_store_n(&ivars->fGainQ16, eff, __ATOMIC_RELEASE);
     os_log(LOG, LOG_PREFIX "mute -> %d gainQ16=%u", in_muted ? 1 : 0, eff);
+    TeacUD501MuteControl *ctls[2] = { ivars->fMuteControl, ivars->fDirectMuteControl };
+    for (int i = 0; i < 2; i++) {
+        if (ctls[i] && ctls[i]->GetControlValue() != in_muted) {
+            ctls[i]->SetControlValue(in_muted);
+        }
+    }
+}
+
+void
+TeacUD501::DirectFollowRate(bool in_follow)
+{
+    // runs inside "(Direct)"'s PerformDeviceConfigurationChange: host IO on it is stopped
+    if (!ivars || ivars->fStopping || !ivars->fDirectDevice || !ivars->fDirectStream) {
+        return;
+    }
+    uint32_t hz = ivars->fRateHz;
+    if (in_follow) {
+        ivars->fDirectDevice->SetSampleRate((double)hz);
+    } else {
+        uint32_t want = (uint32_t)(ivars->fDirectDevice->GetSampleRate() + 0.5);
+        for (uint32_t i = 0; i < ivars->fNumRates; i++) {
+            if (ivars->fRates[i] == want) { hz = want; break; }
+        }
+    }
+    const uint32_t idx = RingIndexForRate(hz);
+    IOUserAudioStreamBasicDescription f = MakeFormat24((double)hz);
+    ivars->fDirectStream->SetCurrentStreamFormat(&f);
+    kern_return_t mr = kIOReturnSuccess, zr = kIOReturnSuccess;
+    if (kRingSizes[idx] != ivars->fDirectRingFrames && ivars->fDirectRingDescs[idx]) {
+        mr = ivars->fDirectStream->SetIOMemoryDescriptor(ivars->fDirectRingDescs[idx]);
+        zr = ivars->fDirectDevice->SetZeroTimeStampPeriod(kRingSizes[idx]);
+        ivars->fDirectRingFrames = kRingSizes[idx];
+    }
+    ivars->fDirectDevice->SetOutputSafetyOffset(SafetyOffsetForRate(hz));
+    __atomic_store_n(&ivars->fDirectWriteEndSample, 0, __ATOMIC_RELEASE);
+    if (ivars->fDirectBufPtr) {
+        memset(ivars->fDirectBufPtr, 0, (size_t)kRingMaxFrames * kRingBytesPerFrame);
+    }
+    __atomic_store_n(&ivars->fDirectRateHz, hz, __ATOMIC_RELEASE);
+    if (hz == ivars->fRateHz) {
+        ivars->fDirectDevice->UpdateCurrentZeroTimestamp(ivars->fLastZtsSample, ivars->fLastZtsHost);
+        os_log(LOG, LOG_PREFIX "Direct: now %u Hz ring %u (mem=0x%x zts=0x%x)",
+               hz, ivars->fDirectRingFrames, mr, zr);
+    } else {
+        __atomic_store_n(&ivars->fPendingMainRate, hz, __ATOMIC_RELEASE);
+        kern_return_t rq = ivars->fAudioDevice
+            ? ivars->fAudioDevice->RequestDeviceConfigurationChange(UD501_MAIN_FOLLOW_ACTION, nullptr)
+            : kIOReturnNotReady;
+        os_log(LOG, LOG_PREFIX "Direct: set to %u Hz by a client, main %u -> %u requested (0x%x)",
+               hz, ivars->fRateHz, hz, rq);
+    }
+}
+
+uint32_t
+TeacUD501::PendingMainRate()
+{
+    return ivars ? __atomic_load_n(&ivars->fPendingMainRate, __ATOMIC_ACQUIRE) : 0;
 }
 
 kern_return_t
@@ -1334,7 +1663,16 @@ IMPL(TeacUD501, Stop)
         os_log(LOG, LOG_PREFIX "Stop: teardown (reconf-wait %ums)", waitedMs);
         OSSafeReleaseNULL(ivars->fVolumeControl);
         OSSafeReleaseNULL(ivars->fMuteControl);
+        OSSafeReleaseNULL(ivars->fDirectVolumeControl);
+        OSSafeReleaseNULL(ivars->fDirectMuteControl);
         OSSafeReleaseNULL(ivars->fOutputStream);
+    OSSafeReleaseNULL(ivars->fDirectStream);
+    for (uint32_t di = 0; di < kNumRingSizes; di++) OSSafeReleaseNULL(ivars->fDirectRingDescs[di]);
+    OSSafeReleaseNULL(ivars->fDirectBuf);
+    OSSafeReleaseNULL(ivars->fDirectDevice);
+        for (uint32_t i = 0; i < kNumRingSizes; i++) {
+            OSSafeReleaseNULL(ivars->fRingDescs[i]);
+        }
         OSSafeReleaseNULL(ivars->fCoreAudioBuf);
         OSSafeReleaseNULL(ivars->fAudioDevice);
         OSSafeReleaseNULL(ivars->fOutAction);

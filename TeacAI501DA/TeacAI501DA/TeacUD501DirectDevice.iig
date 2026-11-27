@@ -1,0 +1,38 @@
+//
+//  TeacUD501DirectDevice.iig
+//  TeacAI501DA
+//
+// === Claude origin ===
+// Created/placed by Anthropic Claude Code at: 2026-11-24-140500
+// UD-501V2 "(Direct)": second output device on the same DAC (see TeacAI501DADirectDevice).
+// Its rate follows the main device and vice versa; this class hands configuration
+// changes to the TeacUD501 driver.
+// ====================
+//
+
+#ifndef TeacUD501DirectDevice_h
+#define TeacUD501DirectDevice_h
+
+#include <AudioDriverKit/IOUserAudioDevice.iig>
+
+class TeacUD501;
+
+class LOCALONLY TeacUD501DirectDevice : public IOUserAudioDevice
+{
+public:
+    virtual bool init(IOUserAudioDriver* in_driver,
+                      bool in_supports_prewarming,
+                      OSString* in_device_uid,
+                      OSString* in_model_uid,
+                      OSString* in_manufacturer_uid,
+                      uint32_t in_zero_timestamp_period) override;
+
+    virtual void free() override;
+
+    virtual kern_return_t PerformDeviceConfigurationChange(uint64_t in_change_action,
+                                                           OSObject* in_change_info) override;
+
+    virtual void SetDriverRef(TeacUD501* in_driver) LOCALONLY;
+};
+
+#endif /* TeacUD501DirectDevice_h */

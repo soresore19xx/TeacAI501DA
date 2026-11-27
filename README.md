@@ -22,6 +22,8 @@ One problem is open: an Audio Hijack session with System-Wide Audio nearly
 always fails to start when it plays to the AI-501DA and that is also the
 default output — see
 [Known issue: Audio Hijack with System-Wide Audio](#known-issue-audio-hijack-with-system-wide-audio).
+An experimental release, v78, works around it; v68 stays the recommended
+release.
 
 **Based on driver source code officially obtained from TEAC**: the source of
 TEAC USB HS Audio Driver 273.4.2, TEAC's own macOS driver for this device,
@@ -34,7 +36,10 @@ by, or supported by TEAC.
 ## Install
 
 Download the notarized disk image from
-[Releases](https://github.com/soresore19xx/TeacAI501DA/releases), drag the app
+[Releases](https://github.com/soresore19xx/TeacAI501DA/releases). v68 is the
+recommended release. v78 is an experimental release, marked as a
+pre-release, for those who need the Audio Hijack workaround — see
+[Workaround: v78](#workaround-v78-experimental-release). Drag the app
 (`Unofficial TEAC USB DAC Driver Installer`; up to v44 it was named
 `TeacAI501DAInstaller`, and the new one updates a driver installed by the
 old one) into `/Applications`, and launch it. It asks whether to install or uninstall
@@ -336,9 +341,21 @@ operation handler helped, and this driver already has one. Feedback Assistant
 lists 11 or more similar reports for FB25705511; whether they describe the
 same failure is not known.
 
-**Workaround (v78, a local build, not released).** The driver publishes a
-second device per DAC, named "(Direct)", that serves as the default output.
-The captured and the played device then differ:
+### Workaround: v78 (experimental release)
+
+**Why it was released.** The evidence points to Core Audio rather than to
+Audio Hijack (see above), it is reported to Apple, and when or whether macOS
+will fix it is not known. Rogue Amoeba support, comparing Audio Hijack's
+debug log, pointed to the same cause and could not promise a change on their
+side. So the stopgap that has been in use on the Mac Studio since
+2026-11-24 was published on 2026-11-28 as
+[v78](https://github.com/soresore19xx/TeacAI501DA/releases/tag/v78), marked
+as a pre-release. It is the v68 volume-ud501 flavor plus the "(Direct)"
+devices and per-rate ring sizes. v68 stays the recommended release for
+everyone who does not need the workaround.
+
+The driver publishes a second device per DAC, named "(Direct)", that serves
+as the default output. The captured and the played device then differ:
 
 | | Default output of macOS | Output Device block in Audio Hijack |
 |---|---|---|
@@ -353,9 +370,28 @@ The captured and the played device then differ:
 - The session must have no block for a "(Direct)" device, not even a disabled
   one: one failed start (14:25) was led by the device of a disabled block.
 
-With v78 on the Mac Studio, volume with the AI-501DA, and switching to and
-volume with the UD-501, were confirmed in use. This is a stopgap, to be dropped once it is no longer needed; the published builds stay
-at v68.
+- Scripts or apps that pick the output by name may now also match the
+  "(Direct)" device.
+
+**Per-rate ring sizes.** v78 also sizes the ring and the zero-timestamp
+period by the sample rate (8192 frames up to 48 kHz, 16384 up to 96 kHz,
+32768 up to 192 kHz, 49152 above). On the Mac Studio the wait before IO
+starts went from 0.05–1.07 s to 0.08–0.22 s when this was made. On its own
+it does not fix the Audio Hijack issue.
+
+**Tested.** v78 was used daily on one Mac, the Mac Studio (Apple M4 Max,
+macOS 27.2.1), with both DACs: playback through Audio Hijack with the
+workaround, volume with the AI-501DA, and switching to and volume with the
+UD-501. It was not run on other Macs or on Intel. The UD-501 was not tried
+in the failing setup; it gets the same second device because it is the same
+kind of device.
+
+**Going back to v68.** v78 installs over v68, but v68 does not install over
+v78, since macOS replaces a driver extension only when `CFBundleVersion`
+increases. Choose "Uninstall" in the app first, then install v68 and
+power-cycle the DAC.
+
+This is a stopgap, to be dropped once it is no longer needed.
 
 ## How other audio drivers are built
 

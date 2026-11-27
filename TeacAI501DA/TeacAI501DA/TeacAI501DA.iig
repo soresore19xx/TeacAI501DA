@@ -41,6 +41,18 @@ public:
      *  by the isoch copy path (unity = strict bit-perfect bypass). */
     virtual void UpdateOutputVolume(float in_decibel) LOCALONLY;
     virtual void UpdateOutputMute(bool in_muted) LOCALONLY;
+
+    /*! "(Direct)" device, called from its PerformDeviceConfigurationChange.
+     *  in_follow = the driver asked it to follow the main device's rate;
+     *  otherwise a client chose a rate on "(Direct)" and the DAC follows it. */
+    virtual void DirectFollowRate(bool in_follow) LOCALONLY;
+
+    /*! Rate the main device must take in a TEAC_MAIN_FOLLOW_ACTION change. */
+    virtual uint32_t PendingMainRate() LOCALONLY;
 };
+
+// configuration-change actions requested by the driver itself
+#define TEAC_DIRECT_FOLLOW_ACTION     0x54454144ULL   // "(Direct)" follows the main device
+#define TEAC_MAIN_FOLLOW_ACTION       0x5445414DULL   // main device follows "(Direct)"
 
 #endif /* TeacAI501DA_h */

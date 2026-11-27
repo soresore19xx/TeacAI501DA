@@ -61,6 +61,14 @@ TeacUD501Device::PerformDeviceConfigurationChange(uint64_t in_change_action,
     kern_return_t ret = IOUserAudioDevice::PerformDeviceConfigurationChange(in_change_action,
                                                                             in_change_info);
     if (ret == kIOReturnSuccess && ivars->fDriver) {
+        // "(Direct)" was set to another rate by a client: take that rate here, then
+        // the USB side below switches to it
+        if (in_change_action == UD501_MAIN_FOLLOW_ACTION) {
+            uint32_t pending = ivars->fDriver->PendingMainRate();
+            if (pending) {
+                SetSampleRate((double)pending);
+            }
+        }
         uint32_t hz = (uint32_t)(GetSampleRate() + 0.5);
         os_log(LOG, LOG_PREFIX "PerformDeviceConfigurationChange action=%llu rate=%u",
                in_change_action, hz);
